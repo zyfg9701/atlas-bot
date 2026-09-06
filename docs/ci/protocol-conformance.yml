@@ -1,0 +1,12 @@
+name: protocol-conformance
+on:
+  push:
+  pull_request:
+jobs:
+  bot-relay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Bot-Relay conformance
+        run: cargo test -p xai-tool-protocol --test bot_relay_conformance

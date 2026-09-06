@@ -1,0 +1,3 @@
+This repository vendors selected crates from an upstream grok-build tree
+pinned in docs/SOURCE_REV.md. Package metadata declares Apache-2.0.
+Full third-party NOTICE consolidation is pending license audit (yellow).

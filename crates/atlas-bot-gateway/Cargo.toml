@@ -1,0 +1,9 @@
+[package]
+name = "atlas-bot-gateway"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "In-box gateway stub — P0 skeleton only"
+
+[dependencies]
+xai-tool-protocol = { path = "../../third_party/xai-tool-protocol" }

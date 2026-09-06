@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+  "third_party/xai-tool-types",
+  "third_party/xai-tool-protocol",
+  "crates/atlas-bot-hub",
+  "crates/atlas-bot-gateway",
+]
