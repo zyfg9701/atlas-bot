@@ -1,0 +1,30 @@
+name: pc-client
+on:
+  push:
+    paths:
+      - "clients/pc/**"
+      - ".github/workflows/pc-client.yml"
+  pull_request:
+    paths:
+      - "clients/pc/**"
+      - ".github/workflows/pc-client.yml"
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/pc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: clients/pc/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Unit tests
+        run: npm run test:unit
+# Full tauri build omitted: needs WebKitGTK; see docs/P2-runbook.md

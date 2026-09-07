@@ -1,3 +1,9 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# PC client (Tauri / frontend)
+clients/pc/node_modules/
+clients/pc/dist/
+clients/pc/src-tauri/target/
+clients/pc/src-tauri/gen/
