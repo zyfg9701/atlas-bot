@@ -3,7 +3,20 @@ name = "atlas-bot-gateway"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "In-box gateway stub — P0 skeleton only"
+description = "In-box gateway stub (listAgents / sendPrompt / getAgentTranscriptTail)"
 
 [dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net"] }
+tower = "0.5"
+tracing = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { version = "1", features = ["v4"] }
 xai-tool-protocol = { path = "../../third_party/xai-tool-protocol" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

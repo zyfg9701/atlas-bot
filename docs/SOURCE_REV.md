@@ -9,7 +9,7 @@
 
 `Cargo.toml` in `third_party/*` was adjusted to path/crates.io deps so the empty atlas-bot workspace compiles without the full grok-build workspace. Wire types/fixtures/tests are unchanged from the pin.
 
-**License audit:** package metadata says Apache-2.0; full dependency/file NOTICE review still yellow — no Hub/gateway business until green.
+**License audit:** package metadata Apache-2.0; root LICENSE + NOTICE expanded in P1; CI denies GPL/AGPL via `tools/license-check/check.sh`. Written P1 exemption recorded on project page.
 
 ## Target repo
 

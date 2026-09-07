@@ -3,7 +3,30 @@ name = "atlas-bot-hub"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Private Computer Hub service shell (stub — no business until license audit)"
+description = "Computer Hub Bot-Relay WebSocket MVP (P1)"
+
+[[bin]]
+name = "atlas-bot-hub"
+path = "src/bin/atlas-bot-hub.rs"
 
 [dependencies]
+atlas-bot-gateway = { path = "../atlas-bot-gateway" }
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 xai-tool-protocol = { path = "../../third_party/xai-tool-protocol" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+url = "2"

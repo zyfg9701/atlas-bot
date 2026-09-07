@@ -1,3 +1,43 @@
-This repository vendors selected crates from an upstream grok-build tree
-pinned in docs/SOURCE_REV.md. Package metadata declares Apache-2.0.
-Full third-party NOTICE consolidation is pending license audit (yellow).
+atlas-bot
+Copyright 2026 atlas-bot contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file at the root of this repository.
+
+========================================================================
+Vendored crates (third_party/)
+========================================================================
+
+xai-tool-protocol
+  Path: third_party/xai-tool-protocol
+  Upstream pin: docs/SOURCE_REV.md (a549186d…)
+  Package license metadata: Apache-2.0
+
+xai-tool-types
+  Path: third_party/xai-tool-types
+  Upstream pin: docs/SOURCE_REV.md (a549186d…)
+  Package license metadata: Apache-2.0
+
+These crates are vendored from an upstream grok-build tree for Bot-Relay
+wire types, fixtures, and conformance tests. Wire semantics are unchanged
+from the pin.
+
+========================================================================
+First-party crates
+========================================================================
+
+atlas-bot-hub, atlas-bot-gateway — Apache-2.0
+
+========================================================================
+Dual-licensed / multi-licensed transitive dependencies
+========================================================================
+
+Many crates.io dependencies declare dual licenses such as
+"MIT OR Apache-2.0", "Apache-2.0 OR MIT", or "BSD-2-Clause OR Apache-2.0".
+atlas-bot elects the Apache-2.0 (or permissive) option where available.
+
+CI (license-check workflow) fails the build if any package license string
+matches GPL or AGPL (case-insensitive).
+
+Run locally:
+  ./tools/license-check/check.sh
