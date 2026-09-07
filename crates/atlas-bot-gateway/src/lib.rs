@@ -1,4 +1,8 @@
-//! In-box gateway stub for atlas-bot P3.
+//! Gateway backends for atlas-bot (P3 stub + P3.5 scheme B).
+//!
+//! - [`InMemoryGateway`] — echo stub (default when Hub has no `ATLAS_GATEWAY_URL`)
+//! - [`CliAgentGateway`] — scheme B Cursor/Atlas Agent CLI (`-p` print mode)
+//! - [`OpenAiCompatGateway`] — optional OpenAI-compat fallback
 //!
 //! Hot commands: `listAgents`, `createAgent`, `sendPrompt`,
 //! `getAgentTranscriptTail`, `interruptAgentRun`. Other catalog names
@@ -6,6 +10,14 @@
 //! `command_rejected` / `gateway/unknown-method`.
 
 #![forbid(unsafe_code)]
+
+pub mod cli_gateway;
+pub mod openai_gateway;
+
+pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_TIMEOUT_MS};
+pub use openai_gateway::{
+    OpenAiCompatGateway, ENV_OPENAI_BASE, ENV_OPENAI_KEY, ENV_OPENAI_MODEL,
+};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -546,6 +558,56 @@ pub async fn serve_http(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "gateway HTTP listening");
     axum::serve(listener, http_router(gw)).await
+}
+
+
+/// HTTP invoke against any [`Gateway`] (CLI / OpenAI / stub).
+#[derive(Clone)]
+struct DynHttpState {
+    gw: Arc<dyn Gateway>,
+}
+
+async fn http_invoke_dyn(
+    State(st): State<DynHttpState>,
+    Json(body): Json<HttpInvokeRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    match st.gw.invoke(&body.agent_id, &body.name, body.args).await {
+        Ok(v) => Ok(Json(v)),
+        Err(GatewayError::UnknownMethod(m)) => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": "gateway/unknown-method", "method": m })),
+        )),
+        Err(e) => Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )),
+    }
+}
+
+async fn http_healthz() -> &'static str {
+    "ok"
+}
+
+async fn http_stats(State(st): State<DynHttpState>) -> Json<Value> {
+    Json(json!({ "invoke_count": st.gw.invoke_count() }))
+}
+
+/// Serve `/invoke`, `/healthz`, `/stats` for any gateway backend.
+pub fn gateway_http_router(gw: Arc<dyn Gateway>) -> Router {
+    Router::new()
+        .route("/invoke", post(http_invoke_dyn))
+        .route("/healthz", axum::routing::get(http_healthz))
+        .route("/stats", axum::routing::get(http_stats))
+        .with_state(DynHttpState { gw })
+}
+
+pub async fn serve_gateway_http(
+    gw: Arc<dyn Gateway>,
+    addr: std::net::SocketAddr,
+) -> Result<(), std::io::Error> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(%addr, "gateway HTTP listening");
+    axum::serve(listener, gateway_http_router(gw)).await
 }
 
 pub struct HttpGatewayClient {

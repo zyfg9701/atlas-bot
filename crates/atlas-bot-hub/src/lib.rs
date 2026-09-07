@@ -1,4 +1,4 @@
-//! Computer Hub Bot-Relay MVP (P3).
+//! Computer Hub Bot-Relay MVP (P3 / P3.5).
 //!
 //! Cold path (`bot.status`, `bot.roster`, `bot.transcript.offbox`) is
 //! answered from in-memory hub state and **never** invokes the gateway.
@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use atlas_bot_gateway::{
@@ -29,7 +29,7 @@ use xai_tool_protocol::{
     COMMAND_REJECTED_NOT_YET_ENABLED, PROTOCOL_VERSION,
 };
 
-pub const HUB_VERSION: &str = "0.3.0-p3";
+pub const HUB_VERSION: &str = "0.3.5-p35";
 
 /// Page size for cold `bot.transcript.offbox` stub pagination.
 pub const OFFBOX_PAGE_SIZE: usize = 2;
@@ -60,6 +60,9 @@ pub struct Hub {
     event_bus: broadcast::Sender<(String /*conn*/, String /*json*/)>,
     cold_hits: AtomicU64,
     hot_hits: AtomicU64,
+    /// When true, `TurnFinishedHint` bridge owns `hub:turn_finished`.
+    /// When false (typical HTTP remote), Hub emits after sync-complete sendPrompt.
+    turn_bridge_active: AtomicBool,
 }
 
 impl Hub {
@@ -91,6 +94,7 @@ impl Hub {
             event_bus,
             cold_hits: AtomicU64::new(0),
             hot_hits: AtomicU64::new(0),
+            turn_bridge_active: AtomicBool::new(false),
         })
     }
 
@@ -121,6 +125,7 @@ impl Hub {
         self: &Arc<Self>,
         mut rx: broadcast::Receiver<atlas_bot_gateway::TurnFinishedHint>,
     ) {
+        self.turn_bridge_active.store(true, Ordering::SeqCst);
         let hub = Arc::clone(self);
         tokio::spawn(async move {
             loop {
@@ -499,6 +504,10 @@ impl Hub {
         }
     }
 
+    pub fn turn_bridge_active(&self) -> bool {
+        self.turn_bridge_active.load(Ordering::SeqCst)
+    }
+
     async fn after_command_success(
         &self,
         name: &str,
@@ -507,6 +516,46 @@ impl Hub {
         result: &Value,
     ) {
         match name {
+            "sendPrompt" => {
+                // HTTP remote / sync-complete: emit hub:turn_finished when the
+                // gateway result asks for it and no in-process TurnFinishedHint
+                // bridge is active (大禹 P3.5 nail).
+                if self.turn_bridge_active.load(Ordering::SeqCst) {
+                    return;
+                }
+                let should_emit = result
+                    .get("hubEmitTurnFinished")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                    || result
+                        .get("completed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                if !should_emit {
+                    return;
+                }
+                let preview = result
+                    .get("preview")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| result.get("reply").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(entries) = result.get("entries").and_then(|v| v.as_array()) {
+                    let parsed: Vec<TranscriptEntry> = entries
+                        .iter()
+                        .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                        .collect();
+                    if !parsed.is_empty() {
+                        self.ingest_turn_entries(envelope_agent_id, &parsed).await;
+                    } else {
+                        // Fallback: ingest raw JSON values into offbox.
+                        self.seed_offbox(envelope_agent_id, entries.clone()).await;
+                    }
+                }
+                if !preview.is_empty() {
+                    self.emit_turn_finished(envelope_agent_id, &preview).await;
+                }
+            }
             "createAgent" => {
                 let agent_id = result
                     .get("agentId")
