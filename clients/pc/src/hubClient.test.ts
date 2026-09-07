@@ -33,13 +33,14 @@ describe("sortEventsBySeq", () => {
   it("sorts by agent then seq without dedupe", () => {
     const evs: BotEventEnvelope[] = [
       { v: 1, agentId: "agt_1", seq: 3, channel: "hub:turn_finished", event: {} },
+      { v: 1, agentId: "agt_2", seq: 1, channel: "hub:turn_finished", event: {} },
       { v: 1, agentId: "agt_1", seq: 1, channel: "hub:turn_finished", event: {} },
       { v: 1, agentId: "agt_1", seq: 2, channel: "hub:turn_finished", event: {} },
     ];
     const s = sortEventsBySeq(evs);
     assert.deepEqual(
-      s.map((e) => e.seq),
-      [1, 2, 3],
+      s.map((e) => `${e.agentId}:${e.seq}`),
+      ["agt_1:1", "agt_1:2", "agt_1:3", "agt_2:1"],
     );
   });
 });

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "P2 PC bot_client (Tauri 2 + TypeScript) for atlas-bot Hub",
+  "description": "P3 PC bot_client (Tauri 2 + TypeScript) for atlas-bot Hub",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

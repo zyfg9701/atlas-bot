@@ -3,7 +3,7 @@ name = "atlas-bot-gateway"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "In-box gateway stub (listAgents / sendPrompt / getAgentTranscriptTail)"
+description = "In-box gateway stub (listAgents / createAgent / sendPrompt / interruptAgentRun / getAgentTranscriptTail)"
 
 [dependencies]
 async-trait = "0.1"

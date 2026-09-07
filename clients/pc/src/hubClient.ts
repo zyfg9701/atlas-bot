@@ -1,8 +1,8 @@
 /**
- * Bot-Relay hub client (P2).
+ * Bot-Relay hub client (P3).
  *
- * Cold path: bot.status / bot.roster — never via bot.command.
- * Hot path: bot.command (listAgents / sendPrompt / getAgentTranscriptTail).
+ * Cold path: bot.status / bot.roster / bot.transcript.offbox — never via bot.command.
+ * Hot path: bot.command (listAgents / createAgent / sendPrompt / getAgentTranscriptTail / interruptAgentRun).
  * Seq: display/sort only — never treat gaps as resync; only hub:resync_required.
  */
 
@@ -24,6 +24,11 @@ export interface RosterEntry {
   name: string;
   status: string;
   lastTurnAt?: number | null;
+}
+
+export interface OffboxPage {
+  entries: unknown;
+  nextCursor?: string | null;
 }
 
 export interface BotEventEnvelope {
@@ -71,7 +76,6 @@ export function normalizeError(data: unknown): DisplayError {
     return { message: "unknown failure", code: "upstream_error", raw: data };
   }
   const o = data as Record<string, unknown>;
-  // JSON-RPC error shape
   if ("message" in o || "code" in o) {
     const msg = String(o.message ?? "error");
     const wireCode = typeof o.message === "string" ? o.message : undefined;
@@ -82,9 +86,7 @@ export function normalizeError(data: unknown): DisplayError {
     const codeStr = wireCode && KNOWN_CODES.has(wireCode) ? wireCode : undefined;
     const reason = typeof payload.reason === "string" ? payload.reason : undefined;
     const retryable = typeof payload.retryable === "boolean" ? payload.retryable : undefined;
-    // Unknown code / message → failure display (do not crash)
     if (wireCode && !KNOWN_CODES.has(wireCode) && typeof o.code === "number" && o.code < 0) {
-      // JSON-RPC standard codes keep message
       return {
         message: msg,
         code: o.code as number,
@@ -188,7 +190,6 @@ export class HubClient {
         }
         const obj = data as Record<string, unknown>;
 
-        // hello_ack (raw, no jsonrpc)
         if (!obj.jsonrpc && obj.connection_id) {
           const ack = obj as unknown as HelloAck;
           this.setState("ready");
@@ -201,7 +202,6 @@ export class HubClient {
           return;
         }
 
-        // JSON-RPC response
         if (obj.jsonrpc === "2.0" && "id" in obj) {
           const id = obj.id as number | string;
           const p = this.pending.get(id);
@@ -222,7 +222,6 @@ export class HubClient {
           return;
         }
 
-        // bot.event notification
         if (obj.jsonrpc === "2.0" && obj.method === "bot.event") {
           const params = obj.params as BotEventEnvelope;
           this.handleEvent(params);
@@ -273,7 +272,6 @@ export class HubClient {
   }
 
   private handleEvent(params: BotEventEnvelope) {
-    // Seq: record for sort/display only — NEVER gap→resync
     const prev = this.lastSeq.get(params.agentId);
     if (prev !== undefined && params.seq !== prev + 1) {
       this.log(
@@ -316,11 +314,17 @@ export class HubClient {
     return this.rpc("bot.roster", {}) as Promise<{ agents: RosterEntry[] }>;
   }
 
+  /** Cold off-box transcript page — must NOT use bot.command / must not wake gateway */
+  transcriptOffbox(agentId: string, cursor?: string | null): Promise<OffboxPage> {
+    const params: Record<string, unknown> = { agentId };
+    if (cursor) params.cursor = cursor;
+    return this.rpc("bot.transcript.offbox", params) as Promise<OffboxPage>;
+  }
+
   subscribe(agentIds: string[], fullFidelity = false): Promise<unknown> {
     return this.rpc("bot.subscribe", { agentIds, ...(fullFidelity ? { fullFidelity: true } : {}) }).then(
       (r) => {
         for (const a of agentIds) this.subscribed.add(a);
-        // seq starts at 1 after subscribe on hub — reset local tracker for display
         for (const a of agentIds) this.lastSeq.delete(a);
         return r;
       },
@@ -343,12 +347,25 @@ export class HubClient {
     return this.command(agentId, "listAgents", {});
   }
 
-  sendPrompt(agentId: string, prompt: string): Promise<unknown> {
-    // envelope agentId must match args.agentId
-    return this.command(agentId, "sendPrompt", { agentId, prompt });
+  /** Minimal createAgent — args.name required */
+  createAgent(routingAgentId: string, name: string, description = ""): Promise<unknown> {
+    const args: Record<string, unknown> = { name };
+    if (description) args.description = description;
+    return this.command(routingAgentId, "createAgent", args);
+  }
+
+  sendPrompt(agentId: string, prompt: string, opts?: { immediate?: boolean }): Promise<unknown> {
+    const args: Record<string, unknown> = { agentId, prompt };
+    if (opts?.immediate) args.immediate = true;
+    return this.command(agentId, "sendPrompt", args);
   }
 
   getAgentTranscriptTail(agentId: string, limit = 20): Promise<unknown> {
     return this.command(agentId, "getAgentTranscriptTail", { id: agentId, limit });
+  }
+
+  /** interruptAgentRun — args include agentId (acceptance); envelope must match */
+  interruptAgentRun(agentId: string): Promise<unknown> {
+    return this.command(agentId, "interruptAgentRun", { agentId });
   }
 }
