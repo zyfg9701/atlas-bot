@@ -10,3 +10,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Bot-Relay conformance
         run: cargo test -p xai-tool-protocol --test bot_relay_conformance
+
+  hub-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: P3 smoke
+        run: cargo test -p atlas-bot-hub --test p3_smoke -- --nocapture --test-threads=1
+      - name: P3.5 smoke
+        run: cargo test -p atlas-bot-hub --test p35_smoke -- --nocapture --test-threads=1
