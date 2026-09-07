@@ -1,11 +1,12 @@
-//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P1 MVP).
+//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P3.5).
 //!
 //! Env:
 //! - `ATLAS_HUB_BIND` — default `127.0.0.1:7700`
 //! - `ATLAS_GATEWAY_URL` — if set, use HTTP gateway at this base URL;
-//!   otherwise embed an in-process [`InMemoryGateway`].
-//! - `ATLAS_GATEWAY_HTTP_BIND` — optional local HTTP gateway bind
-//!   (e.g. `127.0.0.1:8787`).
+//!   otherwise embed an in-process [`InMemoryGateway`] stub.
+//! - `ATLAS_GATEWAY_HTTP_BIND` — optional local HTTP gateway bind for the
+//!   embedded stub (e.g. `127.0.0.1:8787`). For scheme B, run
+//!   `atlas-bot-gateway` separately and set `ATLAS_GATEWAY_URL`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
