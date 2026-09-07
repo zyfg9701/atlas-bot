@@ -71,7 +71,7 @@ ul.agents li {
 ul.agents li:hover { background: #243044; }
 ul.agents li.selected { border-color: var(--accent); background: #1c2a40; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.78rem; }
-#log, #events, #transcript {
+#log, #events, #transcript, #offbox, #listOut {
   max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;

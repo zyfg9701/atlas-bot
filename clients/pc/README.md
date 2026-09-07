@@ -1,19 +1,5 @@
-# atlas-bot PC (P2)
+# atlas-bot PC (P3)
 
-Tauri 2 + TypeScript `bot_client` for the Computer Hub Bot-Relay loop.
+Tauri 2 + TypeScript bot_client for Computer Hub Bot-Relay (P3).
 
-See [`docs/P2-runbook.md`](../../docs/P2-runbook.md).
-
-Quick:
-
-```bash
-# Hub
-cargo run -p atlas-bot-hub
-
-# Frontend (browser / preview)
-cd clients/pc
-npm install && npm run build && npm run preview
-
-# Optional native window (needs WebKitGTK on Linux)
-npm run tauri -- dev
-```
+See docs/P3-runbook.md.

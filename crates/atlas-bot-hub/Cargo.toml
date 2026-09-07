@@ -3,7 +3,7 @@ name = "atlas-bot-hub"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Computer Hub Bot-Relay WebSocket MVP (P1)"
+description = "Computer Hub Bot-Relay WebSocket MVP (P3)"
 
 [[bin]]
 name = "atlas-bot-hub"

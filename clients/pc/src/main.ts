@@ -13,7 +13,7 @@ import {
 const app = document.querySelector("#app")!;
 
 app.innerHTML = `
-  <h1>atlas-bot PC · P2 bot_client</h1>
+  <h1>atlas-bot PC · P3 bot_client</h1>
   <div id="fail" class="fail-banner"></div>
   <div class="panel" style="margin-bottom:12px">
     <div class="row">
@@ -27,39 +27,51 @@ app.innerHTML = `
   </div>
   <div class="grid">
     <div class="panel">
-      <h2>Cold path (status / roster — not bot.command)</h2>
+      <h2>Cold path (status / roster / transcript.offbox)</h2>
       <div class="row">
         <button id="btnStatus">bot.status</button>
         <button id="btnRoster">bot.roster</button>
+        <button id="btnOffbox">offbox page</button>
+        <button id="btnOffboxNext" class="secondary">offbox next</button>
       </div>
       <div class="mono" id="statusOut">runState: —</div>
       <ul class="agents" id="roster"></ul>
+      <h2 style="margin-top:10px">Cold / offline transcript</h2>
+      <div class="mono" id="offboxCursor">cursor: (first page)</div>
+      <div id="offbox" class="mono"></div>
     </div>
     <div class="panel">
-      <h2>Subscribe + hot path</h2>
+      <h2>Multi-agent + hot path</h2>
       <div class="row">
         <label>agent</label>
-        <input id="agentId" value="agt_1" />
+        <select id="agentId"></select>
         <button id="btnSub">subscribe</button>
         <button id="btnUnsub" class="secondary">unsubscribe</button>
       </div>
       <div class="row">
+        <input id="newName" placeholder="new agent name" value="Scout" />
+        <button id="btnCreate">createAgent</button>
         <button id="btnList">listAgents</button>
-        <button id="btnTail">getAgentTranscriptTail</button>
       </div>
-      <textarea id="prompt" placeholder="prompt text">hello P2</textarea>
+      <div class="row">
+        <button id="btnTail">getAgentTranscriptTail</button>
+        <button id="btnInterrupt" class="secondary">interruptAgentRun</button>
+      </div>
+      <textarea id="prompt" placeholder="prompt text">hello P3</textarea>
       <div class="row" style="margin-top:8px">
         <button id="btnSend">sendPrompt</button>
+        <label class="mono"><input type="checkbox" id="immediate" /> immediate (skip interrupt window)</label>
       </div>
+      <div class="mono" id="listOut" style="margin-top:8px"></div>
     </div>
   </div>
   <div class="grid" style="margin-top:12px">
     <div class="panel">
-      <h2>Events (seq sort/display only)</h2>
+      <h2>Events (seq sort/display only; per-agent)</h2>
       <div id="events" class="mono"></div>
     </div>
     <div class="panel">
-      <h2>Transcript tail</h2>
+      <h2>Hot transcript tail (current agent)</h2>
       <div id="transcript" class="mono"></div>
     </div>
   </div>
@@ -76,15 +88,23 @@ const stateEl = $("state");
 const capsEl = $("caps");
 const statusOut = $("statusOut");
 const rosterEl = $("roster");
-const agentEl = $<HTMLInputElement>("agentId");
+const agentEl = $<HTMLSelectElement>("agentId");
 const promptEl = $<HTMLTextAreaElement>("prompt");
+const newNameEl = $<HTMLInputElement>("newName");
+const immediateEl = $<HTMLInputElement>("immediate");
 const logEl = $("log");
 const eventsEl = $("events");
 const transcriptEl = $("transcript");
+const offboxEl = $("offbox");
+const offboxCursorEl = $("offboxCursor");
+const listOut = $("listOut");
 const failEl = $("fail");
 
 const events: BotEventEnvelope[] = [];
 let client: HubClient | null = null;
+let knownAgents: { id: string; name: string }[] = [{ id: "agt_1", name: "Watcher" }];
+let offboxNextCursor: string | null | undefined = undefined;
+let lastRoster: RosterEntry[] = [];
 
 function showFail(err: DisplayError) {
   const bits = [
@@ -116,25 +136,75 @@ function setStateBadge(s: ConnState) {
   stateEl.className = `badge ${s}`;
 }
 
+function currentAgentId(): string {
+  return agentEl.value || "agt_1";
+}
+
+function renderAgentSelect() {
+  const prev = agentEl.value;
+  agentEl.innerHTML = "";
+  for (const a of knownAgents) {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = `${a.id} · ${a.name}`;
+    agentEl.appendChild(opt);
+  }
+  if (prev && knownAgents.some((a) => a.id === prev)) {
+    agentEl.value = prev;
+  } else if (knownAgents.length) {
+    agentEl.value = knownAgents[0].id;
+  }
+}
+
+function mergeKnownFromRoster(agents: RosterEntry[]) {
+  for (const a of agents) {
+    const idx = knownAgents.findIndex((x) => x.id === a.agentId);
+    if (idx >= 0) knownAgents[idx] = { id: a.agentId, name: a.name };
+    else knownAgents.push({ id: a.agentId, name: a.name });
+  }
+  knownAgents.sort((a, b) => a.id.localeCompare(b.id));
+  renderAgentSelect();
+}
+
+function mergeKnownFromList(list: unknown) {
+  if (!Array.isArray(list)) return;
+  for (const row of list) {
+    if (!row || typeof row !== "object") continue;
+    const o = row as Record<string, unknown>;
+    const id = String(o.id ?? "");
+    const name = String(o.name ?? id);
+    if (!id) continue;
+    const idx = knownAgents.findIndex((x) => x.id === id);
+    if (idx >= 0) knownAgents[idx] = { id, name };
+    else knownAgents.push({ id, name });
+  }
+  knownAgents.sort((a, b) => a.id.localeCompare(b.id));
+  renderAgentSelect();
+}
+
 function renderEvents() {
-  const sorted = sortEventsBySeq(events);
+  const aid = currentAgentId();
+  const sorted = sortEventsBySeq(events.filter((e) => e.agentId === aid));
   eventsEl.textContent = sorted
-    .map(
-      (e) =>
-        `#${e.seq} ${e.agentId} ${e.channel} ${JSON.stringify(e.event)}`,
-    )
+    .map((e) => `#${e.seq} ${e.agentId} ${e.channel} ${JSON.stringify(e.event)}`)
     .join("\n");
 }
 
 function renderRoster(agents: RosterEntry[]) {
+  lastRoster = agents;
   rosterEl.innerHTML = "";
   for (const a of agents) {
     const li = document.createElement("li");
     li.textContent = `${a.agentId} · ${a.name} · ${a.status}`;
-    if (a.agentId === agentEl.value) li.classList.add("selected");
+    if (a.agentId === currentAgentId()) li.classList.add("selected");
     li.onclick = () => {
       agentEl.value = a.agentId;
-      renderRoster(agents);
+      offboxNextCursor = undefined;
+      offboxCursorEl.textContent = "cursor: (first page)";
+      offboxEl.textContent = "";
+      renderRoster(lastRoster);
+      renderEvents();
+      void refreshTail();
     };
     rosterEl.appendChild(li);
   }
@@ -155,12 +225,18 @@ function ensureClient(): HubClient {
       onEvent: (ev) => {
         events.push(ev);
         renderEvents();
+        if (ev.agentId !== currentAgentId()) {
+          appendLog("event", `event for other agent ${ev.agentId} (not mixed into current view)`);
+          return;
+        }
         if (ev.channel === "hub:turn_finished") {
           appendLog("event", "turn finished — fetching transcript tail");
           void refreshTail();
         }
         if (ev.channel === "hub:resync_required") {
-          appendLog("warn", "explicit resync_required — re-fetching transcript");
+          appendLog("warn", "explicit resync_required — re-fetching offbox + tail");
+          offboxNextCursor = undefined;
+          void loadOffbox(undefined);
           void refreshTail();
         }
       },
@@ -176,12 +252,37 @@ async function refreshTail() {
   const c = client;
   if (!c || c.connectionState !== "ready") return;
   try {
-    const r = await c.getAgentTranscriptTail(agentEl.value, 20);
+    const r = await c.getAgentTranscriptTail(currentAgentId(), 20);
     transcriptEl.textContent = JSON.stringify(r, null, 2);
   } catch (e) {
     showFail(e as DisplayError);
   }
 }
+
+async function loadOffbox(cursor?: string | null) {
+  const c = ensureClient();
+  try {
+    const page = await c.transcriptOffbox(currentAgentId(), cursor ?? undefined);
+    offboxNextCursor = page.nextCursor ?? null;
+    offboxCursorEl.textContent = cursor
+      ? `cursor: ${cursor} → next=${offboxNextCursor ?? "(end)"}`
+      : `cursor: (first page) → next=${offboxNextCursor ?? "(end)"}`;
+    offboxEl.textContent = JSON.stringify(page, null, 2);
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+}
+
+renderAgentSelect();
+
+agentEl.onchange = () => {
+  offboxNextCursor = undefined;
+  offboxCursorEl.textContent = "cursor: (first page)";
+  offboxEl.textContent = "";
+  renderRoster(lastRoster);
+  renderEvents();
+  void refreshTail();
+};
 
 $("btnConnect").onclick = async () => {
   clearFail();
@@ -195,10 +296,10 @@ $("btnConnect").onclick = async () => {
       connection_id: ack.connection_id,
       hub: ack.computer_hub_version,
     });
-    // cold path immediately
     const st = await c.status();
     statusOut.textContent = `runState: ${st.runState}`;
     const ro = await c.roster();
+    mergeKnownFromRoster(ro.agents || []);
     renderRoster(ro.agents || []);
   } catch (e) {
     showFail(e as DisplayError);
@@ -225,16 +326,32 @@ $("btnRoster").onclick = async () => {
   clearFail();
   try {
     const ro = await ensureClient().roster();
+    mergeKnownFromRoster(ro.agents || []);
     renderRoster(ro.agents || []);
   } catch (e) {
     showFail(e as DisplayError);
   }
 };
 
+$("btnOffbox").onclick = async () => {
+  clearFail();
+  offboxNextCursor = undefined;
+  await loadOffbox(undefined);
+};
+
+$("btnOffboxNext").onclick = async () => {
+  clearFail();
+  if (!offboxNextCursor) {
+    appendLog("warn", "no nextCursor — already at end or load first page");
+    return;
+  }
+  await loadOffbox(offboxNextCursor);
+};
+
 $("btnSub").onclick = async () => {
   clearFail();
   try {
-    await ensureClient().subscribe([agentEl.value]);
+    await ensureClient().subscribe([currentAgentId()]);
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -243,7 +360,7 @@ $("btnSub").onclick = async () => {
 $("btnUnsub").onclick = async () => {
   clearFail();
   try {
-    await ensureClient().unsubscribe([agentEl.value]);
+    await ensureClient().unsubscribe([currentAgentId()]);
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -252,8 +369,33 @@ $("btnUnsub").onclick = async () => {
 $("btnList").onclick = async () => {
   clearFail();
   try {
-    const r = await ensureClient().listAgents(agentEl.value);
+    const r = await ensureClient().listAgents(currentAgentId());
+    listOut.textContent = JSON.stringify(r, null, 2);
+    mergeKnownFromList(r);
     appendLog("info", "listAgents result", r);
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnCreate").onclick = async () => {
+  clearFail();
+  try {
+    const name = newNameEl.value.trim() || "Agent";
+    const r = (await ensureClient().createAgent(currentAgentId(), name)) as {
+      agentId?: string;
+      agent?: { id?: string; name?: string };
+    };
+    appendLog("info", "createAgent result", r);
+    const id = r.agentId || r.agent?.id;
+    if (id) {
+      mergeKnownFromList([{ id, name: r.agent?.name || name }]);
+      agentEl.value = id;
+      const ro = await ensureClient().roster();
+      mergeKnownFromRoster(ro.agents || []);
+      renderRoster(ro.agents || []);
+      await ensureClient().subscribe([id]);
+    }
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -262,8 +404,20 @@ $("btnList").onclick = async () => {
 $("btnSend").onclick = async () => {
   clearFail();
   try {
-    const r = await ensureClient().sendPrompt(agentEl.value, promptEl.value);
+    const r = await ensureClient().sendPrompt(currentAgentId(), promptEl.value, {
+      immediate: immediateEl.checked,
+    });
     appendLog("info", "sendPrompt result", r);
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnInterrupt").onclick = async () => {
+  clearFail();
+  try {
+    const r = await ensureClient().interruptAgentRun(currentAgentId());
+    appendLog("info", "interruptAgentRun result", r);
   } catch (e) {
     showFail(e as DisplayError);
   }
