@@ -20,3 +20,5 @@ jobs:
         run: cargo test -p atlas-bot-hub --test p3_smoke -- --nocapture --test-threads=1
       - name: P3.5 smoke
         run: cargo test -p atlas-bot-hub --test p35_smoke -- --nocapture --test-threads=1
+      - name: P5 smoke
+        run: cargo test -p atlas-bot-hub --test p5_smoke -- --nocapture --test-threads=1
