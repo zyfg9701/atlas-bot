@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeError, sortEventsBySeq, type BotEventEnvelope } from "./hubClient";
+import { CLOSED_SET_REASONS, normalizeError, sortEventsBySeq, type BotEventEnvelope } from "./hubClient";
 
 describe("normalizeError", () => {
   it("keeps known command_rejected", () => {
@@ -42,5 +42,26 @@ describe("sortEventsBySeq", () => {
       s.map((e) => `${e.agentId}:${e.seq}`),
       ["agt_1:1", "agt_1:2", "agt_1:3", "agt_2:1"],
     );
+  });
+});
+
+describe("closed-set attachment reasons", () => {
+  it("surfaces args_too_large", () => {
+    const e = normalizeError({
+      code: -32000,
+      message: "command_rejected",
+      data: { reason: "args_too_large", retryable: false },
+    });
+    assert.equal(e.reason, "args_too_large");
+    assert.ok(CLOSED_SET_REASONS.has("args_too_large"));
+  });
+
+  it("surfaces attachment_not_found", () => {
+    const e = normalizeError({
+      code: -32000,
+      message: "command_rejected",
+      data: { reason: "attachment_not_found", retryable: false },
+    });
+    assert.equal(e.reason, "attachment_not_found");
   });
 });

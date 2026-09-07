@@ -1,13 +1,16 @@
-//! Gateway backends for atlas-bot (P3 stub + P3.5 scheme B).
+//! Gateway backends for atlas-bot (P3 stub + P3.5 scheme B + P5 VNC/attachments).
 //!
 //! - [`InMemoryGateway`] — echo stub (default when Hub has no `ATLAS_GATEWAY_URL`)
 //! - [`CliAgentGateway`] — scheme B Cursor/Atlas Agent CLI (`-p` print mode)
 //! - [`OpenAiCompatGateway`] — optional OpenAI-compat fallback
 //!
 //! Hot commands: `listAgents`, `createAgent`, `sendPrompt`,
-//! `getAgentTranscriptTail`, `interruptAgentRun`. Other catalog names
-//! return [`GatewayError::UnknownMethod`] which the hub maps to
-//! `command_rejected` / `gateway/unknown-method`.
+//! `getAgentTranscriptTail`, `interruptAgentRun`, `uploadAttachment`,
+//! `attachUpload`. Other catalog names return [`GatewayError::UnknownMethod`]
+//! which the hub maps to `command_rejected` / `gateway/unknown-method`.
+//!
+//! VNC is **not** a command name: Hub calls [`Gateway::vnc_descriptor`] for
+//! `bot.vncDescriptor`. Stub serves `GET /vnc-stub` placeholder HTML.
 
 #![forbid(unsafe_code)]
 
@@ -25,13 +28,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::extract::State;
-use axum::routing::post;
+use axum::extract::{Query, State};
+use axum::response::Html;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::info;
+use uuid::Uuid;
 
 /// Default seed agent used by the in-memory stub.
 pub const DEFAULT_AGENT_ID: &str = "agt_1";
@@ -39,6 +45,13 @@ pub const DEFAULT_AGENT_NAME: &str = "Watcher";
 
 /// Default delay before a sendPrompt turn finishes (interruptible window).
 pub const DEFAULT_TURN_DELAY_MS: u64 = 300;
+
+/// Upload `args` JSON hard limit (Bot-Relay closed-set `args_too_large`).
+pub const UPLOAD_ARGS_JSON_MAX_BYTES: usize = 3 * 1024 * 1024;
+/// Decoded attachment object hard limit (`attachment_too_large`).
+pub const ATTACHMENT_OBJECT_MAX_BYTES: usize = 25 * 1024 * 1024;
+/// Default base URL for stub VNC placeholder pages.
+pub const DEFAULT_VNC_STUB_BASE: &str = "http://127.0.0.1:8787";
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
@@ -50,6 +63,28 @@ pub enum GatewayError {
     AgentNotFound(String),
     #[error("upstream: {0}")]
     Upstream(String),
+    /// Closed-set `command_rejected` reason (e.g. `args_too_large`, `attachment_not_found`).
+    #[error("command_rejected/{reason}")]
+    Rejected {
+        reason: String,
+        detail: Option<String>,
+    },
+}
+
+impl GatewayError {
+    pub fn rejected(reason: impl Into<String>) -> Self {
+        Self::Rejected {
+            reason: reason.into(),
+            detail: None,
+        }
+    }
+
+    pub fn rejected_detail(reason: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::Rejected {
+            reason: reason.into(),
+            detail: Some(detail.into()),
+        }
+    }
 }
 
 /// Trait the hub uses for in-process passthrough (preferred) or HTTP client.
@@ -57,6 +92,13 @@ pub enum GatewayError {
 pub trait Gateway: Send + Sync {
     async fn invoke(&self, agent_id: &str, name: &str, args: Value) -> Result<Value, GatewayError>;
     fn invoke_count(&self) -> u64;
+
+    /// Hot path for Hub method `bot.vncDescriptor` (not a command name).
+    /// Default: unsupported (CLI / remote without stub).
+    async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        let _ = agent_id;
+        Err(GatewayError::UnknownMethod("vncDescriptor".into()))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,12 +120,21 @@ pub struct TranscriptEntry {
     pub seq: u64,
 }
 
+#[derive(Debug, Clone)]
+struct UploadRecord {
+    path: String,
+    filename: String,
+    agent_id: String,
+}
+
 #[derive(Debug, Default)]
 struct Inner {
     agents: HashMap<String, AgentRecord>,
     transcripts: HashMap<String, Vec<TranscriptEntry>>,
     next_entry_seq: HashMap<String, u64>,
     next_agent_n: u64,
+    /// uploadId -> stored stub attachment
+    uploads: HashMap<String, UploadRecord>,
 }
 
 struct PendingTurn {
@@ -96,6 +147,9 @@ struct Shared {
     pending: RwLock<HashMap<String, Arc<PendingTurn>>>,
     turn_delay: Duration,
     turn_tx: tokio::sync::broadcast::Sender<TurnFinishedHint>,
+    /// Base URL used when minting stub VNC descriptors (no trailing slash).
+    vnc_stub_base: String,
+    upload_root: std::path::PathBuf,
 }
 
 /// In-memory gateway stub.
@@ -148,6 +202,15 @@ impl InMemoryGateway {
         );
         let mut next_entry_seq = HashMap::new();
         next_entry_seq.insert(DEFAULT_AGENT_ID.to_string(), 2);
+        let upload_root = std::env::temp_dir().join(format!(
+            "atlas-bot-uploads-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&upload_root);
+        let vnc_stub_base = std::env::var("ATLAS_VNC_STUB_BASE")
+            .unwrap_or_else(|_| DEFAULT_VNC_STUB_BASE.to_string())
+            .trim_end_matches('/')
+            .to_string();
         Self {
             shared: Arc::new(Shared {
                 inner: RwLock::new(Inner {
@@ -155,13 +218,20 @@ impl InMemoryGateway {
                     transcripts,
                     next_entry_seq,
                     next_agent_n: 2,
+                    uploads: HashMap::new(),
                 }),
                 invokes: AtomicU64::new(0),
                 pending: RwLock::new(HashMap::new()),
                 turn_delay,
                 turn_tx,
+                vnc_stub_base,
+                upload_root,
             }),
         }
+    }
+
+    pub fn vnc_stub_base(&self) -> &str {
+        &self.shared.vnc_stub_base
     }
 
     pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<TurnFinishedHint> {
@@ -479,6 +549,114 @@ impl InMemoryGateway {
         Ok(json!({ "accepted": true }))
     }
 
+    async fn upload_attachment(
+        &self,
+        agent_id: &str,
+        args: &Value,
+    ) -> Result<Value, GatewayError> {
+        let args_json = serde_json::to_vec(args).unwrap_or_default();
+        if args_json.len() > UPLOAD_ARGS_JSON_MAX_BYTES {
+            return Err(GatewayError::rejected(
+                xai_tool_protocol::COMMAND_REJECTED_ARGS_TOO_LARGE,
+            ));
+        }
+        let filename = args
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing filename".into()))?
+            .to_string();
+        // Keep path segment safe.
+        let safe_name = filename
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let b64 = args
+            .get("bytesBase64")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing bytesBase64".into()))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| GatewayError::InvalidArgs(format!("invalid bytesBase64: {e}")))?;
+        if bytes.len() > ATTACHMENT_OBJECT_MAX_BYTES {
+            return Err(GatewayError::rejected(
+                xai_tool_protocol::COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+            ));
+        }
+        let upload_id = format!("upl_{}", Uuid::new_v4().simple());
+        let dir = self.shared.upload_root.join(&upload_id);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| GatewayError::Upstream(format!("mkdir: {e}")))?;
+        let file_path = dir.join(&safe_name);
+        std::fs::write(&file_path, &bytes)
+            .map_err(|e| GatewayError::Upstream(format!("write: {e}")))?;
+        let path = file_path.to_string_lossy().to_string();
+        {
+            let mut guard = self.shared.inner.write().await;
+            guard.uploads.insert(
+                upload_id.clone(),
+                UploadRecord {
+                    path: path.clone(),
+                    filename: safe_name,
+                    agent_id: agent_id.to_string(),
+                },
+            );
+        }
+        Ok(json!({
+            "path": path,
+            "uploadId": upload_id,
+        }))
+    }
+
+    async fn attach_upload(&self, agent_id: &str, args: &Value) -> Result<Value, GatewayError> {
+        let upload_id = args
+            .get("uploadId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing uploadId".into()))?;
+        let guard = self.shared.inner.read().await;
+        match guard.uploads.get(upload_id) {
+            Some(rec) => Ok(json!({
+                "path": rec.path,
+                "filename": rec.filename,
+                "agentId": rec.agent_id,
+            })),
+            None => {
+                let _ = agent_id;
+                Err(GatewayError::rejected(
+                    xai_tool_protocol::COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+                ))
+            }
+        }
+    }
+
+    async fn mint_vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        if agent_id.trim().is_empty() {
+            return Err(GatewayError::InvalidArgs("missing agentId".into()));
+        }
+        let expires_hint = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64 + 5 * 60 * 1000)
+            .unwrap_or(0);
+        let vnc_url = format!(
+            "{}/vnc-stub?agent={}",
+            self.shared.vnc_stub_base,
+            urlencoding_lite(agent_id)
+        );
+        Ok(json!({
+            "vncUrl": vnc_url,
+            "expiresHint": expires_hint,
+        }))
+    }
+
     async fn dispatch(&self, agent_id: &str, name: &str, args: Value) -> Result<Value, GatewayError> {
         match name {
             "listAgents" => self.list_agents().await,
@@ -486,9 +664,25 @@ impl InMemoryGateway {
             "sendPrompt" => self.send_prompt(agent_id, &args).await,
             "interruptAgentRun" => self.interrupt_agent_run(agent_id, &args).await,
             "getAgentTranscriptTail" => self.get_transcript_tail(agent_id, &args).await,
+            "uploadAttachment" => self.upload_attachment(agent_id, &args).await,
+            "attachUpload" => self.attach_upload(agent_id, &args).await,
             other => Err(GatewayError::UnknownMethod(other.to_string())),
         }
     }
+}
+
+/// Minimal query escaping for agent id in stub URLs (no extra dep).
+fn urlencoding_lite(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -502,6 +696,12 @@ impl Gateway for InMemoryGateway {
     fn invoke_count(&self) -> u64 {
         self.shared.invokes.load(Ordering::SeqCst)
     }
+
+    async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        self.shared.invokes.fetch_add(1, Ordering::SeqCst);
+        info!(%agent_id, "gateway vnc_descriptor");
+        self.mint_vnc_descriptor(agent_id).await
+    }
 }
 
 #[async_trait]
@@ -512,6 +712,10 @@ impl Gateway for Arc<InMemoryGateway> {
 
     fn invoke_count(&self) -> u64 {
         (**self).invoke_count()
+    }
+
+    async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        (**self).vnc_descriptor(agent_id).await
     }
 }
 
@@ -528,26 +732,78 @@ struct HttpState {
     gw: InMemoryGateway,
 }
 
+fn map_gateway_http_err(e: GatewayError) -> (axum::http::StatusCode, Json<Value>) {
+    match e {
+        GatewayError::UnknownMethod(m) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": "gateway/unknown-method", "method": m })),
+        ),
+        GatewayError::Rejected { reason, detail } => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "command_rejected",
+                "reason": reason,
+                "detail": detail,
+            })),
+        ),
+        other => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": other.to_string() })),
+        ),
+    }
+}
+
 async fn http_invoke(
     State(st): State<HttpState>,
     Json(body): Json<HttpInvokeRequest>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     match st.gw.invoke(&body.agent_id, &body.name, body.args).await {
         Ok(v) => Ok(Json(v)),
-        Err(GatewayError::UnknownMethod(m)) => Err((
-            axum::http::StatusCode::NOT_FOUND,
-            Json(json!({ "error": "gateway/unknown-method", "method": m })),
-        )),
-        Err(e) => Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )),
+        Err(e) => Err(map_gateway_http_err(e)),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct VncStubQuery {
+    agent: Option<String>,
+}
+
+async fn http_vnc_stub(Query(q): Query<VncStubQuery>) -> Html<String> {
+    let agent = q.agent.unwrap_or_else(|| "(unknown)".into());
+    Html(format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>atlas-bot VNC stub</title>
+<style>body{{font-family:system-ui;background:#0f1419;color:#e7ecf3;padding:24px}}
+code{{background:#1a2332;padding:2px 6px;border-radius:4px}}</style></head>
+<body>
+<h1>P5 VNC placeholder</h1>
+<p>Agent: <code>{agent}</code></p>
+<p>This is a short-lived stub page — not a real noVNC session.</p>
+</body></html>"#
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VncDescriptorRequest {
+    agent_id: String,
+}
+
+async fn http_vnc_descriptor(
+    State(st): State<HttpState>,
+    Json(body): Json<VncDescriptorRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    match st.gw.vnc_descriptor(&body.agent_id).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(map_gateway_http_err(e)),
     }
 }
 
 pub fn http_router(gw: Arc<InMemoryGateway>) -> Router {
     Router::new()
         .route("/invoke", post(http_invoke))
+        .route("/vnc-descriptor", post(http_vnc_descriptor))
+        .route("/vnc-stub", get(http_vnc_stub))
         .with_state(HttpState { gw: (*gw).clone() })
 }
 
@@ -573,14 +829,17 @@ async fn http_invoke_dyn(
 ) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     match st.gw.invoke(&body.agent_id, &body.name, body.args).await {
         Ok(v) => Ok(Json(v)),
-        Err(GatewayError::UnknownMethod(m)) => Err((
-            axum::http::StatusCode::NOT_FOUND,
-            Json(json!({ "error": "gateway/unknown-method", "method": m })),
-        )),
-        Err(e) => Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
-        )),
+        Err(e) => Err(map_gateway_http_err(e)),
+    }
+}
+
+async fn http_vnc_descriptor_dyn(
+    State(st): State<DynHttpState>,
+    Json(body): Json<VncDescriptorRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    match st.gw.vnc_descriptor(&body.agent_id).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(map_gateway_http_err(e)),
     }
 }
 
@@ -592,12 +851,14 @@ async fn http_stats(State(st): State<DynHttpState>) -> Json<Value> {
     Json(json!({ "invoke_count": st.gw.invoke_count() }))
 }
 
-/// Serve `/invoke`, `/healthz`, `/stats` for any gateway backend.
+/// Serve `/invoke`, `/vnc-descriptor`, `/vnc-stub`, `/healthz`, `/stats`.
 pub fn gateway_http_router(gw: Arc<dyn Gateway>) -> Router {
     Router::new()
         .route("/invoke", post(http_invoke_dyn))
-        .route("/healthz", axum::routing::get(http_healthz))
-        .route("/stats", axum::routing::get(http_stats))
+        .route("/vnc-descriptor", post(http_vnc_descriptor_dyn))
+        .route("/vnc-stub", get(http_vnc_stub))
+        .route("/healthz", get(http_healthz))
+        .route("/stats", get(http_stats))
         .with_state(DynHttpState { gw })
 }
 
@@ -626,6 +887,30 @@ impl HttpGatewayClient {
     }
 }
 
+fn map_http_error_body(name: &str, status: reqwest::StatusCode, val: &Value) -> GatewayError {
+    if status.as_u16() == 404 {
+        let m = val
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or(name)
+            .to_string();
+        return GatewayError::UnknownMethod(m);
+    }
+    if val.get("error").and_then(|v| v.as_str()) == Some("command_rejected") {
+        if let Some(reason) = val.get("reason").and_then(|v| v.as_str()) {
+            let detail = val
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return GatewayError::Rejected {
+                reason: reason.to_string(),
+                detail,
+            };
+        }
+    }
+    GatewayError::Upstream(val.to_string())
+}
+
 #[async_trait]
 impl Gateway for HttpGatewayClient {
     async fn invoke(&self, agent_id: &str, name: &str, args: Value) -> Result<Value, GatewayError> {
@@ -648,22 +933,36 @@ impl Gateway for HttpGatewayClient {
             .json()
             .await
             .map_err(|e| GatewayError::Upstream(e.to_string()))?;
-        if status.as_u16() == 404 {
-            let m = val
-                .get("method")
-                .and_then(|v| v.as_str())
-                .unwrap_or(name)
-                .to_string();
-            return Err(GatewayError::UnknownMethod(m));
-        }
         if !status.is_success() {
-            return Err(GatewayError::Upstream(val.to_string()));
+            return Err(map_http_error_body(name, status, &val));
         }
         Ok(val)
     }
 
     fn invoke_count(&self) -> u64 {
         self.invokes.load(Ordering::SeqCst)
+    }
+
+    async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        self.invokes.fetch_add(1, Ordering::SeqCst);
+        let url = format!("{}/vnc-descriptor", self.base);
+        let body = json!({ "agentId": agent_id });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| GatewayError::Upstream(e.to_string()))?;
+        let status = resp.status();
+        let val: Value = resp
+            .json()
+            .await
+            .map_err(|e| GatewayError::Upstream(e.to_string()))?;
+        if !status.is_success() {
+            return Err(map_http_error_body("vncDescriptor", status, &val));
+        }
+        Ok(val)
     }
 }
 
@@ -766,5 +1065,76 @@ mod tests {
         let _ = gw.snapshot_transcript("agt_1").await;
         let _ = gw.snapshot_agents().await;
         assert_eq!(gw.invoke_count(), before);
+    }
+
+    #[tokio::test]
+    async fn vnc_descriptor_hot_and_shaped() {
+        let gw = InMemoryGateway::new();
+        let before = gw.invoke_count();
+        let v = gw.vnc_descriptor("agt_1").await.unwrap();
+        assert_eq!(gw.invoke_count(), before + 1);
+        let url = v["vncUrl"].as_str().unwrap();
+        assert!(url.contains("/vnc-stub?agent=agt_1"), "{url}");
+        assert!(v["expiresHint"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn upload_and_attach_roundtrip() {
+        let gw = InMemoryGateway::new();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"hello p5");
+        let up = gw
+            .invoke(
+                "agt_1",
+                "uploadAttachment",
+                json!({ "bytesBase64": b64, "filename": "note.txt" }),
+            )
+            .await
+            .unwrap();
+        let path = up["path"].as_str().unwrap();
+        assert!(!path.is_empty());
+        assert!(std::path::Path::new(path).is_file());
+        let upload_id = up["uploadId"].as_str().unwrap().to_string();
+        let att = gw
+            .invoke(
+                "agt_1",
+                "attachUpload",
+                json!({ "uploadId": upload_id }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(att["path"], path);
+        let err = gw
+            .invoke(
+                "agt_1",
+                "attachUpload",
+                json!({ "uploadId": "upl_missing" }),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            GatewayError::Rejected { reason, .. } => {
+                assert_eq!(reason, "attachment_not_found");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_args_too_large() {
+        let gw = InMemoryGateway::new();
+        // Build args JSON > 3 MiB without needing huge real files.
+        let big = "A".repeat(UPLOAD_ARGS_JSON_MAX_BYTES + 64);
+        let err = gw
+            .invoke(
+                "agt_1",
+                "uploadAttachment",
+                json!({ "bytesBase64": big, "filename": "x.bin" }),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            GatewayError::Rejected { reason, .. } => assert_eq!(reason, "args_too_large"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

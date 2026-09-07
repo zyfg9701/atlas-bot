@@ -2,12 +2,12 @@
 
 Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gateway.
 
-## Status (P3.5)
+## Status (P5)
 
 - Monorepo + vendored `xai-tool-protocol` @ `a549186d…`
-- **Hub** WebSocket JSON-RPC (`crates/atlas-bot-hub`) — cold `bot.transcript.offbox`
-- **Gateway** stub + CLI adapter + optional OpenAI (`crates/atlas-bot-gateway`) — scheme B real dialogue
-- **PC bot_client** Tauri 2 + TypeScript (`clients/pc/`) — multi-agent + offbox + interrupt
+- **Hub** WebSocket JSON-RPC (`crates/atlas-bot-hub`) — cold offbox + hot `bot.vncDescriptor`
+- **Gateway** stub + CLI adapter + optional OpenAI — uploadAttachment / attachUpload stubs + VNC placeholder
+- **PC bot_client** Tauri 2 + TypeScript — Open desktop + file upload
 - License hygiene + protocol conformance CI; PC frontend CI (`pc-client.yml`)
 
 ## Layout
@@ -18,10 +18,7 @@ Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gatewa
 | `crates/atlas-bot-hub` | Computer Hub WS binary + lib |
 | `crates/atlas-bot-gateway` | Stub + CLI/OpenAI gateway backends |
 | `clients/pc/` | PC bot_client (Tauri 2 + TS) |
-| `docs/P1-runbook.md` | Hub smoke |
-| `docs/P2-runbook.md` | PC closed-loop smoke |
-| `docs/P3-runbook.md` | Offbox + multi-agent + interrupt |
-| `docs/P3.5-runbook.md` | Real CLI gateway (scheme B) |
+| `docs/P1-runbook.md` … `docs/P5-runbook.md` | Phase runbooks |
 | `docs/SOURCE_REV.md` | Upstream pin |
 
 ## Quick check
@@ -29,13 +26,12 @@ Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gatewa
 ```bash
 cargo test -p xai-tool-protocol --test bot_relay_conformance
 cargo test -p atlas-bot-hub -p atlas-bot-gateway
-cargo test -p atlas-bot-hub --test p3_smoke -- --nocapture   # SMOKE_OK
-cargo test -p atlas-bot-hub --test p35_smoke -- --nocapture --test-threads=1
+cargo test -p atlas-bot-hub --test p5_smoke -- --nocapture   # SMOKE_OK p5 …
 cargo run -p atlas-bot-hub
 ```
 
-PC / real gateway: see [`docs/P3.5-runbook.md`](./docs/P3.5-runbook.md).
+P5 VNC/attachments: see [`docs/P5-runbook.md`](./docs/P5-runbook.md).
 
-## Out of scope (P3.5)
+## Out of scope (P5)
 
-mcp-adapter, real IdP, mobile, VNC, production installers, vendor grok runtime (scheme C).
+Real noVNC cluster, IdP, groups/channels, `readAttachment*`, production installers, vendor grok runtime.

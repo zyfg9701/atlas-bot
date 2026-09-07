@@ -4,9 +4,9 @@
 //! - `ATLAS_HUB_BIND` — default `127.0.0.1:7700`
 //! - `ATLAS_GATEWAY_URL` — if set, use HTTP gateway at this base URL;
 //!   otherwise embed an in-process [`InMemoryGateway`] stub.
-//! - `ATLAS_GATEWAY_HTTP_BIND` — optional local HTTP gateway bind for the
-//!   embedded stub (e.g. `127.0.0.1:8787`). For scheme B, run
-//!   `atlas-bot-gateway` separately and set `ATLAS_GATEWAY_URL`.
+//! - `ATLAS_GATEWAY_HTTP_BIND` — embedded stub HTTP bind (default
+//!   `127.0.0.1:8787` for P5 VNC stub). Set `off` to disable. For scheme B,
+//!   run `atlas-bot-gateway` separately and set `ATLAS_GATEWAY_URL`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,14 +52,18 @@ async fn main() {
         };
 
     if let Some(gw) = gw_opt {
-        if let Ok(http_bind) = std::env::var("ATLAS_GATEWAY_HTTP_BIND") {
+        // P5: default-enable stub HTTP (VNC placeholder + /invoke) on :8787.
+        // Set ATLAS_GATEWAY_HTTP_BIND=off to disable.
+        let http_bind = std::env::var("ATLAS_GATEWAY_HTTP_BIND")
+            .unwrap_or_else(|_| "127.0.0.1:8787".into());
+        if http_bind != "off" && !http_bind.is_empty() {
             let addr: SocketAddr = http_bind.parse().expect("ATLAS_GATEWAY_HTTP_BIND");
             tokio::spawn(async move {
                 if let Err(e) = serve_http(gw, addr).await {
                     warn!("gateway HTTP exited: {e}");
                 }
             });
-            info!(%addr, "embedded gateway HTTP enabled");
+            info!(%addr, "embedded gateway HTTP enabled (VNC stub /vnc-stub)");
         }
     }
 
