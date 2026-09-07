@@ -5,11 +5,15 @@ on:
       - "clients/android/**"
       - "third_party/xai-tool-protocol/generated/kotlin/**"
       - ".github/workflows/android-client.yml"
+      - "tools/p4-smoke.sh"
+      - "tools/p4-ws-closed-loop.py"
   pull_request:
     paths:
       - "clients/android/**"
       - "third_party/xai-tool-protocol/generated/kotlin/**"
       - ".github/workflows/android-client.yml"
+      - "tools/p4-smoke.sh"
+      - "tools/p4-ws-closed-loop.py"
 jobs:
   assemble:
     runs-on: ubuntu-latest
@@ -32,4 +36,7 @@ jobs:
         run: ./gradlew :app:assembleDebug --no-daemon
       - name: Unit tests
         run: ./gradlew :app:testDebugUnitTest --no-daemon
+      - name: P4 closed-loop smoke (SMOKE_OK)
+        working-directory: .
+        run: ./tools/p4-smoke.sh
 # iOS: requires macOS + Xcode — see docs/P4-runbook.md (no runner in P4).

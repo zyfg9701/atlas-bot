@@ -78,4 +78,6 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     // org.json is Android-provided at runtime; needed on JVM for unit tests.
     testImplementation("org.json:json:20240303")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
+

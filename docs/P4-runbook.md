@@ -113,25 +113,49 @@ Same loop as Android (§Connect → cold → subscribe → sendPrompt → turn_f
 
 ## Smoke checklist → `SMOKE_OK`
 
-Automated without devices:
+### Automated (CI-friendly, no emulator)
 
 ```bash
-# Android encoding / error normalization
-cd clients/android && ./gradlew :app:testDebugUnitTest
+# Preferred one-liner — Android HubClient closed-loop vs in-process MockWebServer
+# (non-echo transcript shaped like P3.5 mock CLI)
+./tools/p4-smoke.sh
+
+# Expect:
+# SMOKE_OK p4 android mock-ws non-echo+hello+cold+subscribe+sendPrompt+turn_finished+transcriptTail
+
+# Live Hub + P3.5 gateway (mock CLI) on the same wire path mobile uses:
+./tools/p4-smoke.sh --with-hub
+# Expect also:
+# SMOKE_OK p4 ws-hub gateway-mock non-echo+hello+cold+subscribe+sendPrompt+turn_finished+transcriptTail
+
+# Encoding / error unit tests (included in CI)
+cd clients/android && ./gradlew :app:assembleDebug :app:testDebugUnitTest
 
 # Hub still green (optional; needs Rust toolchain)
 cargo test -p atlas-bot-hub --test p3_smoke -- --nocapture
-# with gateway:
 cargo test -p atlas-bot-hub --test p35_smoke -- --nocapture --test-threads=1
 ```
 
-Manual one-liner after a successful Android or iOS click path against stub Hub:
+### Evidence — how non-echo is proven
+
+| Path | What runs | Non-echo proof |
+|------|-----------|----------------|
+| **Android JVM** `P4ClosedLoopSmokeTest` | `HubClient` ↔ OkHttp `MockWebServer` Bot-Relay WS | `sendPrompt` preview + `getAgentTranscriptTail` contain `atlas-mock-reply …` and **must not** be `echo: …` or bare prompt |
+| **Live Hub** `tools/p4-smoke.sh --with-hub` | gateway (`ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh`) + Hub + `tools/p4-ws-closed-loop.py` | Same assertions on real `hub:turn_finished` + transcriptTail |
+| **Emulator hand-check** | App → `ws://10.0.2.2:7700/ws` against Hub from `--with-hub` | UI transcript shows `atlas-mock-reply` (not stub `echo:`) |
+
+Recorded `SMOKE_OK` lines (copy from script/CI logs into PR):
+
+```text
+SMOKE_OK p4 android mock-ws non-echo+hello+cold+subscribe+sendPrompt+turn_finished+transcriptTail
+SMOKE_OK p4 ws-hub gateway-mock non-echo+hello+cold+subscribe+sendPrompt+turn_finished+transcriptTail
+```
+
+Manual one-liner after a successful Android or iOS click path (stub Hub echo is OK for handshake-only; **§5 true gateway** needs mock CLI / `--with-hub`):
 
 ```text
 SMOKE_OK p4 mobile hello+cold+subscribe+sendPrompt+turn_finished+transcriptTail
 ```
-
-For P3.5: repeat sendPrompt and confirm transcript is **non-echo** (mock CLI / real agent).
 
 ## Protocol compliance (both apps)
 

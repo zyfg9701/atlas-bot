@@ -292,6 +292,13 @@ class HubClient(
         setState(ConnState.DISCONNECTED)
     }
 
+    /** Release OkHttp threads (required for MockWebServer / JVM unit tests). */
+    fun shutdown() {
+        disconnect()
+        runCatching { client.dispatcher.executorService.shutdown() }
+        runCatching { client.connectionPool.evictAll() }
+    }
+
     private fun handleEvent(params: JSONObject) {
         val agentId = params.optString("agentId")
         val seq = params.optLong("seq")
