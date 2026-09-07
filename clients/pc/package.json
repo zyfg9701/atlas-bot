@@ -1,0 +1,23 @@
+{
+  "name": "atlas-bot-pc",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "P2 PC bot_client (Tauri 2 + TypeScript) for atlas-bot Hub",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test:unit": "npx tsx --test src/hubClient.test.ts"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^5.9.2",
+    "vite": "^6.3.5",
+    "tsx": "^4.20.5"
+  }
+}
