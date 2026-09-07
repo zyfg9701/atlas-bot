@@ -1,9 +1,11 @@
-//! Computer Hub Bot-Relay MVP (P3 / P3.5).
+//! Computer Hub Bot-Relay MVP (P3 / P3.5 / P5).
 //!
 //! Cold path (`bot.status`, `bot.roster`, `bot.transcript.offbox`) is
 //! answered from in-memory hub state and **never** invokes the gateway.
 //! Hot path (`bot.command`) passthroughs `name`/`args` verbatim via
 //! [`atlas_bot_gateway::Gateway`].
+//! Hot path (`bot.vncDescriptor`) is a first-class Hub method (not a
+//! command name) that asks the gateway for a short-lived desktop URL.
 
 #![forbid(unsafe_code)]
 
@@ -21,15 +23,15 @@ use uuid::Uuid;
 use xai_tool_protocol::{
     BotCommandParams, BotEmptyResult, BotEventEnvelope, BotRelayError, BotRelayErrorCode,
     BotRelayErrorDetail, BotRosterEntry, BotRosterResult, BotRunState, BotStatusResult,
-    BotSubscribeParams, BotTranscriptOffboxParams, BotTranscriptOffboxResult, ConnectionId,
-    ConnectionKind, HelloAckMsg, HelloMsg, HubChannel, HubTurnFinishedEvent, JsonRpcError,
-    JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, Method,
-    ResponseOutcome, UserId, BOT_RELAY_CAPABILITIES, COMMAND_REJECTED_AGENT_ID_MISMATCH,
-    COMMAND_REJECTED_ARGS_INVALID, COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD,
-    COMMAND_REJECTED_NOT_YET_ENABLED, PROTOCOL_VERSION,
+    BotSubscribeParams, BotTranscriptOffboxParams, BotTranscriptOffboxResult,
+    BotVncDescriptorParams, BotVncDescriptorResult, ConnectionId, ConnectionKind, HelloAckMsg,
+    HelloMsg, HubChannel, HubTurnFinishedEvent, JsonRpcError, JsonRpcId, JsonRpcNotification,
+    JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, Method, ResponseOutcome, UserId,
+    BOT_RELAY_CAPABILITIES, COMMAND_REJECTED_AGENT_ID_MISMATCH, COMMAND_REJECTED_ARGS_INVALID,
+    COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD, COMMAND_REJECTED_NOT_YET_ENABLED, PROTOCOL_VERSION,
 };
 
-pub const HUB_VERSION: &str = "0.3.5-p35";
+pub const HUB_VERSION: &str = "0.5.0-p5";
 
 /// Page size for cold `bot.transcript.offbox` stub pagination.
 pub const OFFBOX_PAGE_SIZE: usize = 2;
@@ -395,7 +397,14 @@ impl Hub {
                     Err(e) => JsonRpcResponse::err(id, reject_args(e.to_string())),
                 }
             }
-            Some(Method::BotVncDescriptor) | Some(Method::BotBindConversation) => {
+            Some(Method::BotVncDescriptor) => {
+                self.hot_hits.fetch_add(1, Ordering::SeqCst);
+                match serde_json::from_value::<BotVncDescriptorParams>(req.params) {
+                    Ok(params) => self.handle_vnc_descriptor(id, params).await,
+                    Err(e) => JsonRpcResponse::err(id, reject_args(e.to_string())),
+                }
+            }
+            Some(Method::BotBindConversation) => {
                 JsonRpcResponse::err(id, not_yet_enabled(&req.method))
             }
             Some(Method::Hello) => match serde_json::from_value::<HelloMsg>(req.params) {
@@ -470,37 +479,34 @@ impl Hub {
                     .await;
                 JsonRpcResponse::ok(id, result)
             }
-            Err(GatewayError::UnknownMethod(_)) => {
-                let err = BotRelayError {
-                    code: BotRelayErrorCode::CommandRejected,
-                    retryable: false,
-                    detail: BotRelayErrorDetail::default(),
-                    reason: Some(COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD.to_string()),
-                };
-                JsonRpcResponse::err(id, JsonRpcError::from(err))
-            }
-            Err(GatewayError::InvalidArgs(msg)) => {
-                let err = BotRelayError {
-                    code: BotRelayErrorCode::CommandRejected,
-                    retryable: false,
-                    detail: BotRelayErrorDetail {
-                        upstream: Some(msg),
-                    },
-                    reason: Some(COMMAND_REJECTED_ARGS_INVALID.to_string()),
-                };
-                JsonRpcResponse::err(id, JsonRpcError::from(err))
-            }
-            Err(e) => {
-                let err = BotRelayError {
-                    code: BotRelayErrorCode::UpstreamError,
-                    retryable: true,
-                    detail: BotRelayErrorDetail {
-                        upstream: Some(e.to_string()),
-                    },
-                    reason: None,
-                };
-                JsonRpcResponse::err(id, JsonRpcError::from(err))
-            }
+            Err(e) => JsonRpcResponse::err(id, gateway_error_to_rpc(e)),
+        }
+    }
+
+    async fn handle_vnc_descriptor(
+        &self,
+        id: JsonRpcId,
+        params: BotVncDescriptorParams,
+    ) -> JsonRpcResponse<Value> {
+        info!(agent_id = %params.agent_id, "hot bot.vncDescriptor -> gateway");
+        match self.gateway.vnc_descriptor(&params.agent_id).await {
+            Ok(raw) => match serde_json::from_value::<BotVncDescriptorResult>(raw.clone()) {
+                Ok(shaped) => JsonRpcResponse::ok(id, serde_json::to_value(shaped).unwrap()),
+                Err(_) => {
+                    // Accept gateway stub JSON that already matches wire shape.
+                    if raw.get("vncUrl").and_then(|v| v.as_str()).is_some() {
+                        JsonRpcResponse::ok(id, raw)
+                    } else {
+                        JsonRpcResponse::err(
+                            id,
+                            gateway_error_to_rpc(GatewayError::Upstream(
+                                "malformed vnc descriptor".into(),
+                            )),
+                        )
+                    }
+                }
+            },
+            Err(e) => JsonRpcResponse::err(id, gateway_error_to_rpc(e)),
         }
     }
 
@@ -622,6 +628,41 @@ fn reject_args(msg: String) -> JsonRpcError {
         },
         reason: Some(COMMAND_REJECTED_ARGS_INVALID.to_string()),
     })
+}
+
+fn gateway_error_to_rpc(e: GatewayError) -> JsonRpcError {
+    match e {
+        GatewayError::UnknownMethod(_) => JsonRpcError::from(BotRelayError {
+            code: BotRelayErrorCode::CommandRejected,
+            retryable: false,
+            detail: BotRelayErrorDetail::default(),
+            reason: Some(COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD.to_string()),
+        }),
+        GatewayError::InvalidArgs(msg) => JsonRpcError::from(BotRelayError {
+            code: BotRelayErrorCode::CommandRejected,
+            retryable: false,
+            detail: BotRelayErrorDetail {
+                upstream: Some(msg),
+            },
+            reason: Some(COMMAND_REJECTED_ARGS_INVALID.to_string()),
+        }),
+        GatewayError::Rejected { reason, detail } => JsonRpcError::from(BotRelayError {
+            code: BotRelayErrorCode::CommandRejected,
+            retryable: false,
+            detail: BotRelayErrorDetail {
+                upstream: detail,
+            },
+            reason: Some(reason),
+        }),
+        e => JsonRpcError::from(BotRelayError {
+            code: BotRelayErrorCode::UpstreamError,
+            retryable: true,
+            detail: BotRelayErrorDetail {
+                upstream: Some(e.to_string()),
+            },
+            reason: None,
+        }),
+    }
 }
 
 fn not_yet_enabled(method: &str) -> JsonRpcError {
@@ -850,6 +891,98 @@ mod cold_hot_tests {
         assert!(matches!(r.outcome, ResponseOutcome::Result(_)));
         assert_eq!(gw.invoke_count(), before + 1);
         assert_eq!(hub.hot_hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn hot_vnc_descriptor_invokes_gateway() {
+        let (hub, gw) = Hub::with_in_memory_gateway();
+        let before = gw.invoke_count();
+        let cold_before = hub.cold_hits();
+        let resp = hub
+            .handle_rpc(
+                "c1",
+                rpc(
+                    "bot.vncDescriptor",
+                    json!({ "agentId": "agt_1" }),
+                    1,
+                ),
+            )
+            .await;
+        let ResponseOutcome::Result(v) = resp.outcome else {
+            panic!("expected result, got {resp:?}");
+        };
+        assert!(v["vncUrl"].as_str().unwrap().contains("/vnc-stub?agent=agt_1"));
+        assert!(v["expiresHint"].as_i64().unwrap() > 0);
+        assert_eq!(gw.invoke_count(), before + 1);
+        assert_eq!(hub.hot_hits(), 1);
+        assert_eq!(hub.cold_hits(), cold_before, "vnc must not be cold");
+    }
+
+    #[tokio::test]
+    async fn upload_attachment_and_closed_set_errors() {
+        let (hub, _gw) = Hub::with_in_memory_gateway();
+        let b64 = "cDUtYnl0ZXM="; // base64("p5-bytes")
+        let ok = hub
+            .handle_rpc(
+                "c1",
+                rpc(
+                    "bot.command",
+                    json!({
+                        "agentId": "agt_1",
+                        "name": "uploadAttachment",
+                        "args": { "bytesBase64": b64, "filename": "a.txt" }
+                    }),
+                    1,
+                ),
+            )
+            .await;
+        let ResponseOutcome::Result(okv) = ok.outcome else {
+            panic!("expected upload result, got {ok:?}");
+        };
+        let path = okv["path"].as_str().unwrap().to_string();
+        assert!(!path.is_empty());
+        let upload_id = okv["uploadId"].as_str().unwrap().to_string();
+
+        let att = hub
+            .handle_rpc(
+                "c1",
+                rpc(
+                    "bot.command",
+                    json!({
+                        "agentId": "agt_1",
+                        "name": "attachUpload",
+                        "args": { "uploadId": upload_id }
+                    }),
+                    2,
+                ),
+            )
+            .await;
+        let ResponseOutcome::Result(attv) = att.outcome else {
+            panic!("expected attach result, got {att:?}");
+        };
+        assert_eq!(attv["path"], path);
+
+        let missing = hub
+            .handle_rpc(
+                "c1",
+                rpc(
+                    "bot.command",
+                    json!({
+                        "agentId": "agt_1",
+                        "name": "attachUpload",
+                        "args": { "uploadId": "upl_nope" }
+                    }),
+                    3,
+                ),
+            )
+            .await;
+        match missing.outcome {
+            ResponseOutcome::Error(e) => {
+                assert_eq!(e.message, "command_rejected");
+                assert_eq!(e.data.unwrap()["reason"], "attachment_not_found");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

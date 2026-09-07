@@ -13,7 +13,7 @@ import {
 const app = document.querySelector("#app")!;
 
 app.innerHTML = `
-  <h1>atlas-bot PC · P3 bot_client</h1>
+  <h1>atlas-bot PC · P5 bot_client</h1>
   <div id="fail" class="fail-banner"></div>
   <div class="panel" style="margin-bottom:12px">
     <div class="row">
@@ -76,6 +76,23 @@ app.innerHTML = `
     </div>
   </div>
   <div class="panel" style="margin-top:12px">
+    <h2>P5 · Desktop (bot.vncDescriptor) + attachments</h2>
+    <div class="row">
+      <button id="btnVnc">Open desktop</button>
+      <span class="mono" id="vncOut">vnc: —</span>
+    </div>
+    <div class="row">
+      <input id="filePick" type="file" />
+      <button id="btnUpload">uploadAttachment</button>
+      <button id="btnAttach" class="secondary">attachUpload (last id)</button>
+    </div>
+    <div class="mono" id="uploadOut">upload path: —</div>
+    <p class="mono" style="color:var(--muted);margin:6px 0 0">
+      UI caps file pick at 1.5 MiB (args JSON hard limit 3 MiB → reason args_too_large).
+      Closed-set reasons show in the Failure banner.
+    </p>
+  </div>
+  <div class="panel" style="margin-top:12px">
     <h2>Log</h2>
     <div id="log" class="mono"></div>
   </div>
@@ -99,12 +116,19 @@ const offboxEl = $("offbox");
 const offboxCursorEl = $("offboxCursor");
 const listOut = $("listOut");
 const failEl = $("fail");
+const vncOut = $("vncOut");
+const uploadOut = $("uploadOut");
+const filePick = $<HTMLInputElement>("filePick");
 
 const events: BotEventEnvelope[] = [];
 let client: HubClient | null = null;
 let knownAgents: { id: string; name: string }[] = [{ id: "agt_1", name: "Watcher" }];
 let offboxNextCursor: string | null | undefined = undefined;
 let lastRoster: RosterEntry[] = [];
+let lastUploadId: string | null = null;
+
+/** PC-side soft cap — far below gateway 3 MiB args JSON limit. */
+const UI_UPLOAD_MAX_BYTES = Math.floor(1.5 * 1024 * 1024);
 
 function showFail(err: DisplayError) {
   const bits = [
@@ -115,6 +139,9 @@ function showFail(err: DisplayError) {
   ].filter(Boolean);
   failEl.textContent = `Failure: ${bits.join(" · ")}`;
   failEl.classList.add("show");
+  if (err.reason) {
+    appendLog("error", `protocol error reason=${err.reason}`, err);
+  }
 }
 
 function clearFail() {
@@ -426,4 +453,81 @@ $("btnInterrupt").onclick = async () => {
 $("btnTail").onclick = async () => {
   clearFail();
   await refreshTail();
+};
+
+$("btnVnc").onclick = async () => {
+  clearFail();
+  try {
+    const r = await ensureClient().vncDescriptor(currentAgentId());
+    const exp =
+      r.expiresHint == null
+        ? "expiresHint=null"
+        : `expiresHint=${r.expiresHint} (${new Date(r.expiresHint).toLocaleString()})`;
+    vncOut.textContent = `vncUrl=${r.vncUrl} · ${exp}`;
+    appendLog("info", "bot.vncDescriptor", r);
+    window.open(r.vncUrl, "_blank", "noopener,noreferrer");
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const comma = dataUrl.indexOf(",");
+      resolve(comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl);
+    };
+    reader.onerror = () => reject(reader.error || new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+$("btnUpload").onclick = async () => {
+  clearFail();
+  const file = filePick.files?.[0];
+  if (!file) {
+    showFail({ message: "pick a file first", code: "upstream_error" });
+    return;
+  }
+  if (file.size > UI_UPLOAD_MAX_BYTES) {
+    showFail({
+      message: "command_rejected",
+      code: "command_rejected",
+      reason: "args_too_large",
+      retryable: false,
+    });
+    appendLog("warn", `UI rejected file ${file.size} bytes > ${UI_UPLOAD_MAX_BYTES}`);
+    return;
+  }
+  try {
+    const b64 = await readFileAsBase64(file);
+    const r = await ensureClient().uploadAttachment(currentAgentId(), file.name, b64);
+    lastUploadId = r.uploadId || null;
+    uploadOut.textContent = `upload path: ${r.path}` + (lastUploadId ? ` · uploadId=${lastUploadId}` : "");
+    appendLog("info", "uploadAttachment", r);
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnAttach").onclick = async () => {
+  clearFail();
+  if (!lastUploadId) {
+    showFail({
+      message: "command_rejected",
+      code: "command_rejected",
+      reason: "attachment_not_found",
+      retryable: false,
+    });
+    return;
+  }
+  try {
+    const r = await ensureClient().attachUpload(currentAgentId(), lastUploadId);
+    uploadOut.textContent = `attach path: ${r.path} · uploadId=${lastUploadId}`;
+    appendLog("info", "attachUpload", r);
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
 };

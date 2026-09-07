@@ -37,6 +37,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "reqwest",
  "serde",
  "serde_json",
@@ -57,6 +58,7 @@ dependencies = [
  "atlas-bot-gateway",
  "axum",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",

@@ -2,7 +2,7 @@
  * Bot-Relay hub client (P3).
  *
  * Cold path: bot.status / bot.roster / bot.transcript.offbox — never via bot.command.
- * Hot path: bot.command (listAgents / createAgent / sendPrompt / getAgentTranscriptTail / interruptAgentRun).
+ * Hot path: bot.command (… / uploadAttachment / attachUpload) and bot.vncDescriptor (not a command).
  * Seq: display/sort only — never treat gaps as resync; only hub:resync_required.
  */
 
@@ -70,6 +70,27 @@ const KNOWN_CODES = new Set([
   "upstream_error",
   "forbidden",
 ]);
+
+/** Closed-set command_rejected reasons PC must surface (P5 attachments + prior). */
+export const CLOSED_SET_REASONS = new Set([
+  "args_too_large",
+  "attachment_too_large",
+  "attachment_not_found",
+  "attachment_not_ready",
+  "attachment_wrong_source",
+  "attachments_not_supported_in_live",
+  "attachment_credential_unavailable",
+  "agent_id_mismatch",
+  "args_invalid",
+  "gateway/unknown-method",
+  "not_yet_enabled",
+]);
+
+export function formatClosedSetReason(reason?: string): string | undefined {
+  if (!reason) return undefined;
+  if (CLOSED_SET_REASONS.has(reason)) return reason;
+  return reason; // still show unknown reason tokens; code may degrade separately
+}
 
 export function normalizeError(data: unknown): DisplayError {
   if (!data || typeof data !== "object") {
@@ -367,5 +388,32 @@ export class HubClient {
   /** interruptAgentRun — args include agentId (acceptance); envelope must match */
   interruptAgentRun(agentId: string): Promise<unknown> {
     return this.command(agentId, "interruptAgentRun", { agentId });
+  }
+
+  /** Hot Hub method — NOT a bot.command name. */
+  vncDescriptor(agentId: string): Promise<{ vncUrl: string; expiresHint: number | null }> {
+    return this.rpc("bot.vncDescriptor", { agentId }) as Promise<{
+      vncUrl: string;
+      expiresHint: number | null;
+    }>;
+  }
+
+  /** Hot upload — UI should keep files well under 3 MiB args JSON. */
+  uploadAttachment(
+    agentId: string,
+    filename: string,
+    bytesBase64: string,
+  ): Promise<{ path: string; uploadId?: string }> {
+    return this.command(agentId, "uploadAttachment", {
+      bytesBase64,
+      filename,
+      agentId,
+    }) as Promise<{ path: string; uploadId?: string }>;
+  }
+
+  attachUpload(agentId: string, uploadId: string): Promise<{ path: string }> {
+    return this.command(agentId, "attachUpload", { uploadId, agentId }) as Promise<{
+      path: string;
+    }>;
   }
 }
