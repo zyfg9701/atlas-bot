@@ -1,0 +1,42 @@
+name: android-client
+on:
+  push:
+    paths:
+      - "clients/android/**"
+      - "third_party/xai-tool-protocol/generated/kotlin/**"
+      - ".github/workflows/android-client.yml"
+      - "tools/p4-smoke.sh"
+      - "tools/p4-ws-closed-loop.py"
+  pull_request:
+    paths:
+      - "clients/android/**"
+      - "third_party/xai-tool-protocol/generated/kotlin/**"
+      - ".github/workflows/android-client.yml"
+      - "tools/p4-smoke.sh"
+      - "tools/p4-ws-closed-loop.py"
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Ensure generated-kotlin symlink
+        run: |
+          test -L generated-kotlin || ln -sfn ../../third_party/xai-tool-protocol/generated/kotlin generated-kotlin
+          test -f generated-kotlin/BotRelay.kt
+      - name: Assemble debug
+        run: ./gradlew :app:assembleDebug --no-daemon
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+      - name: P4 closed-loop smoke (SMOKE_OK)
+        working-directory: .
+        run: ./tools/p4-smoke.sh
+# iOS: requires macOS + Xcode — see docs/P4-runbook.md (no runner in P4).
