@@ -1,8 +1,9 @@
-//! Gateway backends for atlas-bot (P3 stub + P3.5 scheme B + P5 VNC/attachments).
+//! Gateway backends for atlas-bot (P3 stub + P3.5 scheme B + P5 VNC/attachments + R1 box).
 //!
 //! - [`InMemoryGateway`] — echo stub (default when Hub has no `ATLAS_GATEWAY_URL`)
 //! - [`CliAgentGateway`] — scheme B Cursor/Atlas Agent CLI (`-p` print mode)
 //! - [`OpenAiCompatGateway`] — optional OpenAI-compat fallback
+//! - [`BoxSidecarGateway`] — R1 Box Sidecar (multi-turn + workspace tools)
 //!
 //! Hot commands: `listAgents`, `createAgent`, `sendPrompt`,
 //! `getAgentTranscriptTail`, `interruptAgentRun`, `uploadAttachment`,
@@ -17,9 +18,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod box_sidecar;
 pub mod cli_gateway;
 pub mod openai_gateway;
 
+pub use box_sidecar::{
+    BoxSidecarGateway, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE, DEFAULT_BOX_TURN_DELAY_MS,
+};
 pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_TIMEOUT_MS};
 pub use openai_gateway::{
     OpenAiCompatGateway, ENV_OPENAI_BASE, ENV_OPENAI_KEY, ENV_OPENAI_MODEL,

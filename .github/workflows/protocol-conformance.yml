@@ -28,3 +28,5 @@ jobs:
         run: cargo test -p atlas-bot-cli --test p6_smoke -- --nocapture --test-threads=1
       - name: α ACP adapter smoke
         run: cargo test -p atlas-acp-adapter --test alpha_smoke -- --nocapture --test-threads=1
+      - name: R1 runtime (box sidecar) smoke
+        run: cargo test -p atlas-bot-hub --test runtime_smoke -- --nocapture --test-threads=1

@@ -1,4 +1,4 @@
-//! Standalone real gateway (P3.5 scheme B).
+//! Standalone gateway binary (P3.5 scheme B + R1 box sidecar).
 //!
 //! Listens on loopback by default (`127.0.0.1:8787`) and exposes:
 //! - `POST /invoke` — Bot-Relay hot commands
@@ -7,16 +7,18 @@
 //!
 //! Env:
 //! - `ATLAS_GATEWAY_HTTP_BIND` — default `127.0.0.1:8787`
-//! - `ATLAS_GATEWAY_BACKEND` — `cli` (default) | `openai` | `stub`
+//! - `ATLAS_GATEWAY_BACKEND` — `cli` (default) | `openai` | `stub` | `box`
 //! - `ATLAS_AGENT_CLI` — CLI binary for scheme B (default `agent`)
 //! - `ATLAS_AGENT_CLI_EXTRA_ARGS` — JSON string array
 //! - `ATLAS_OPENAI_*` — when backend=`openai`
+//! - `ATLAS_BOX_WORKSPACE` / `ATLAS_BOX_TURN_DELAY_MS` — when backend=`box`
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use atlas_bot_gateway::{
-    serve_gateway_http, CliAgentGateway, Gateway, InMemoryGateway, OpenAiCompatGateway,
+    serve_gateway_http, BoxSidecarGateway, CliAgentGateway, Gateway, InMemoryGateway,
+    OpenAiCompatGateway,
 };
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -45,6 +47,10 @@ async fn main() {
             info!("backend=openai (fallback only)");
             let g = OpenAiCompatGateway::from_env().expect("openai env");
             Arc::new(g)
+        }
+        "box" | "sidecar" | "box-sidecar" => {
+            info!("backend=box (BoxSidecarGateway R1)");
+            Arc::new(BoxSidecarGateway::from_env())
         }
         "cli" | _ => {
             info!("backend=cli (Cursor/Atlas Agent CLI adapter)");
