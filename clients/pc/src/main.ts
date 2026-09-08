@@ -9,6 +9,14 @@ import {
   type HelloAck,
   type RosterEntry,
 } from "./hubClient";
+import {
+  buildAuthorizeUrl,
+  detectTauri,
+  generatePkce,
+  parseCallbackUrl,
+  pickHubBearer,
+  exchangeCode,
+} from "./authClient";
 
 const app = document.querySelector("#app")!;
 
@@ -23,6 +31,13 @@ app.innerHTML = `
       <button id="btnDisconnect" class="secondary">Disconnect</button>
       <span id="state" class="badge disconnected">disconnected</span>
     </div>
+    <div class="row">
+      <label>Bearer</label>
+      <input id="tokenPaste" placeholder="optional paste token (dev) or after Login" />
+      <button id="btnLogin">Login (OIDC PKCE)</button>
+      <button id="btnLogout" class="secondary">Logout</button>
+    </div>
+    <div class="mono" id="authOut">auth: (none) · Tauri Bearer WS for production oidc/static</div>
     <div class="mono" id="caps">capabilities: —</div>
   </div>
   <div class="grid">
@@ -119,6 +134,10 @@ const failEl = $("fail");
 const vncOut = $("vncOut");
 const uploadOut = $("uploadOut");
 const filePick = $<HTMLInputElement>("filePick");
+const tokenPaste = $<HTMLInputElement>("tokenPaste");
+const authOut = $("authOut");
+
+let sessionToken: string | undefined;
 
 const events: BotEventEnvelope[] = [];
 let client: HubClient | null = null;
@@ -315,14 +334,42 @@ $("btnConnect").onclick = async () => {
   clearFail();
   events.length = 0;
   renderEvents();
+  const pasted = tokenPaste.value.trim() || sessionToken;
+  if (pasted) sessionToken = pasted;
   const c = ensureClient();
   c.setUrl(urlEl.value);
+  c.setAuthorization(sessionToken);
+
+  // Production path: Tauri rust WS with Authorization header (browser cannot).
+  if (sessionToken && detectTauri()) {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const r = await invoke<{ ok: boolean; detail: string }>("connect_ws", {
+        url: urlEl.value,
+        authorization: sessionToken,
+      });
+      appendLog("info", "tauri connect_ws", r);
+      authOut.textContent = `auth: Bearer set · ${r.detail}`;
+    } catch (e) {
+      appendLog("warn", "tauri connect_ws failed; falling back to browser WS", e);
+    }
+  } else if (sessionToken && !detectTauri()) {
+    authOut.textContent =
+      "auth: token held in memory — plain browser cannot set WS Authorization; use Tauri PC build or CLI for oidc/static Hub";
+  } else {
+    authOut.textContent = "auth: (none) · Hub dev mode OK";
+  }
+
   try {
-    const ack = await c.connect();
+    const ack = await c.connect({ authorization: sessionToken });
     appendLog("info", "connected", {
       connection_id: ack.connection_id,
+      user_id: ack.user_id,
       hub: ack.computer_hub_version,
     });
+    capsEl.textContent =
+      "capabilities: " + (ack.capabilities?.join(", ") || "(none)") +
+      ` · user_id=${ack.user_id}`;
     const st = await c.status();
     statusOut.textContent = `runState: ${st.runState}`;
     const ro = await c.roster();
@@ -331,6 +378,73 @@ $("btnConnect").onclick = async () => {
   } catch (e) {
     showFail(e as DisplayError);
   }
+};
+
+$("btnLogin").onclick = async () => {
+  clearFail();
+  const issuer = (prompt("OIDC issuer (e.g. http://127.0.0.1:PORT)", "") || "").trim();
+  if (!issuer) {
+    appendLog("warn", "login cancelled — no issuer");
+    return;
+  }
+  const clientId = (prompt("client_id", "atlas-bot-pc") || "atlas-bot-pc").trim();
+  const audience = (prompt("audience (optional)", "atlas-hub") || "").trim() || undefined;
+  try {
+    const pkce = await generatePkce();
+    const state = crypto.randomUUID();
+    // Loopback redirect — for full flow use CLI or a local helper; here we
+    // document manual callback paste for vite smoke without system browser bind.
+    const redirectUri =
+      prompt("redirect_uri", "http://127.0.0.1:8765/callback") ||
+      "http://127.0.0.1:8765/callback";
+    const authorizeUrl = buildAuthorizeUrl({
+      authorizeUrl: issuer.replace(/\/$/, "") + "/authorize",
+      clientId,
+      redirectUri,
+      state,
+      pkce,
+      audience,
+    });
+    appendLog("info", "authorize_url", authorizeUrl);
+    window.open(authorizeUrl, "_blank", "noopener,noreferrer");
+    const callback = prompt(
+      "After IdP redirects, paste the full callback URL (…/callback?code=…&state=…)",
+    );
+    if (!callback) {
+      appendLog("warn", "login cancelled — no callback");
+      return;
+    }
+    const parsed = parseCallbackUrl(callback);
+    if (parsed.error) throw new Error(parsed.error);
+    if (!parsed.code) throw new Error("missing code");
+    if (parsed.state && parsed.state !== state) throw new Error("state mismatch");
+    const tr = await exchangeCode({
+      tokenUrl: issuer.replace(/\/$/, "") + "/token",
+      clientId,
+      redirectUri,
+      code: parsed.code,
+      codeVerifier: pkce.verifier,
+    });
+    const bearer = pickHubBearer(tr);
+    if (!bearer) throw new Error("no id_token/access_token");
+    sessionToken = bearer;
+    tokenPaste.value = bearer;
+    authOut.textContent = "auth: logged in (id_token preferred) — Connect uses Tauri Bearer when available";
+    appendLog("info", "login ok", { has_id_token: !!tr.id_token });
+  } catch (e) {
+    showFail({ message: String(e), code: "upstream_error" });
+  }
+};
+
+$("btnLogout").onclick = () => {
+  sessionToken = undefined;
+  tokenPaste.value = "";
+  client?.setAuthorization(undefined);
+  client?.disconnect();
+  client = null;
+  authOut.textContent = "auth: logged out";
+  capsEl.textContent = "capabilities: —";
+  appendLog("info", "logout");
 };
 
 $("btnDisconnect").onclick = () => {

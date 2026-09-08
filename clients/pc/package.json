@@ -9,7 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:unit": "npx tsx --test src/hubClient.test.ts"
+    "test:unit": "npx tsx --test src/hubClient.test.ts src/authClient.test.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1"

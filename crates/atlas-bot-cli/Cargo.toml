@@ -10,17 +10,23 @@ name = "atlas-bot-cli"
 path = "src/main.rs"
 
 [dependencies]
+atlas-bot-auth-client = { path = "../atlas-bot-auth-client" }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "process"] }
 tokio-tungstenite = "0.26"
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+atlas-bot-auth-client = { path = "../atlas-bot-auth-client" }
 atlas-bot-gateway = { path = "../atlas-bot-gateway" }
 atlas-bot-hub = { path = "../atlas-bot-hub" }
 axum = { version = "0.8", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tower-http = { version = "0.6", features = ["trace"] }
+uuid = { version = "1", features = ["v4"] }

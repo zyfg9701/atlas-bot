@@ -6,5 +6,6 @@ members = [
   "crates/atlas-bot-hub",
   "crates/atlas-bot-gateway",
   "crates/atlas-bot-cli",
+  "crates/atlas-bot-auth-client",
   "crates/atlas-acp-adapter",
 ]
