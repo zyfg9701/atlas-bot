@@ -3,7 +3,7 @@ name = "atlas-bot-gateway"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Gateway backends: in-memory stub, CLI agent adapter (P3.5 B), optional OpenAI-compat"
+description = "Gateway backends: stub, CLI (P3.5 B), OpenAI-compat, R1 box sidecar"
 
 [[bin]]
 name = "atlas-bot-gateway"

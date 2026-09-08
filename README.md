@@ -6,7 +6,7 @@ Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gatewa
 
 - Monorepo + vendored `xai-tool-protocol` @ `a549186d…`
 - **Hub** WebSocket JSON-RPC (`crates/atlas-bot-hub`) — cold offbox + hot `bot.vncDescriptor`
-- **Gateway** stub + CLI adapter + optional OpenAI — uploadAttachment / attachUpload stubs + VNC placeholder
+- **Gateway** stub + CLI adapter + optional OpenAI + **R1 Box Sidecar** — uploadAttachment / attachUpload stubs + VNC placeholder
 - **PC bot_client** Tauri 2 + TypeScript — Open desktop + file upload
 - License hygiene + protocol conformance CI; PC frontend CI (`pc-client.yml`)
 
@@ -16,11 +16,11 @@ Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gatewa
 |------|------|
 | `third_party/xai-tool-*` | Vendored Bot-Relay protocol |
 | `crates/atlas-bot-hub` | Computer Hub WS binary + lib |
-| `crates/atlas-bot-gateway` | Stub + CLI/OpenAI gateway backends |
+| `crates/atlas-bot-gateway` | Stub + CLI/OpenAI + R1 Box Sidecar backends |
 | `crates/atlas-bot-cli` | P6 β′ thin Bot-Relay CLI (`bot_client` → Hub WS; ≠ ACP) |
 | `crates/atlas-acp-adapter` | α minimal ACP subset adapter (`:8790` → Hub bot_client) |
 | `clients/pc/` | PC bot_client (Tauri 2 + TS) |
-| `docs/P1-runbook.md` … `docs/P6-runbook.md` / `P6-alpha-runbook.md` | Phase runbooks |
+| `docs/P1-runbook.md` … `docs/P6-*.md` / `runtime-boundary-runbook.md` | Phase + R1 runbooks |
 | `docs/SOURCE_REV.md` | Upstream pin |
 
 ## Quick check
@@ -31,6 +31,7 @@ cargo test -p atlas-bot-hub -p atlas-bot-gateway
 cargo test -p atlas-bot-hub --test p5_smoke -- --nocapture   # SMOKE_OK p5 …
 cargo test -p atlas-bot-cli --test p6_smoke -- --nocapture  # SMOKE_OK p6 …
 cargo test -p atlas-acp-adapter --test alpha_smoke -- --nocapture  # SMOKE_OK alpha …
+cargo test -p atlas-bot-hub --test runtime_smoke -- --nocapture  # SMOKE_OK runtime …
 cargo run -p atlas-bot-hub
 ```
 
