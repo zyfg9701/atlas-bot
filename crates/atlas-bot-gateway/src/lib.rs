@@ -10,7 +10,10 @@
 //! which the hub maps to `command_rejected` / `gateway/unknown-method`.
 //!
 //! VNC is **not** a command name: Hub calls [`Gateway::vnc_descriptor`] for
-//! `bot.vncDescriptor`. Stub serves `GET /vnc-stub` placeholder HTML.
+//! `bot.vncDescriptor`. Modes: `ATLAS_VNC_MODE=stub|proxy` (default stub);
+//! `ATLAS_ATTACH_MODE=memory|disk` (default memory). Proxy without
+//! `ATLAS_VNC_UPSTREAM` degrades to the stub page. Disk mode persists under
+//! `ATLAS_ATTACH_ROOT` with TTL metadata.
 
 #![forbid(unsafe_code)]
 
@@ -23,13 +26,15 @@ pub use openai_gateway::{
 };
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::extract::{Query, State};
-use axum::response::Html;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
@@ -50,8 +55,120 @@ pub const DEFAULT_TURN_DELAY_MS: u64 = 300;
 pub const UPLOAD_ARGS_JSON_MAX_BYTES: usize = 3 * 1024 * 1024;
 /// Decoded attachment object hard limit (`attachment_too_large`).
 pub const ATTACHMENT_OBJECT_MAX_BYTES: usize = 25 * 1024 * 1024;
-/// Default base URL for stub VNC placeholder pages.
+/// Default base URL for stub VNC placeholder pages / public gateway base.
 pub const DEFAULT_VNC_STUB_BASE: &str = "http://127.0.0.1:8787";
+/// Env: `stub` (default) or `proxy`.
+pub const ENV_VNC_MODE: &str = "ATLAS_VNC_MODE";
+/// Env: `memory` (default / CI) or `disk` (real default in runbook).
+pub const ENV_ATTACH_MODE: &str = "ATLAS_ATTACH_MODE";
+/// Env: filesystem root for disk attachments (default `./data/attachments`).
+pub const ENV_ATTACH_ROOT: &str = "ATLAS_ATTACH_ROOT";
+/// Env: RFB upstream `host:port` for proxy mode (optional).
+pub const ENV_VNC_UPSTREAM: &str = "ATLAS_VNC_UPSTREAM";
+/// Env: attachment TTL seconds (default 86400 = 24h).
+pub const ENV_ATTACH_TTL_SECS: &str = "ATLAS_ATTACH_TTL_SECS";
+/// Default disk attachment root.
+pub const DEFAULT_ATTACH_ROOT: &str = "./data/attachments";
+/// Default attachment TTL (24h).
+pub const DEFAULT_ATTACH_TTL_SECS: u64 = 24 * 60 * 60;
+/// VNC token / expiresHint TTL (5 minutes).
+pub const DEFAULT_VNC_TOKEN_TTL_MS: i64 = 5 * 60 * 1000;
+
+/// VNC serving mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VncMode {
+    Stub,
+    Proxy,
+}
+
+impl VncMode {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "proxy" => Self::Proxy,
+            _ => Self::Stub,
+        }
+    }
+}
+
+/// Attachment storage mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachMode {
+    Memory,
+    Disk,
+}
+
+impl AttachMode {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "disk" => Self::Disk,
+            _ => Self::Memory,
+        }
+    }
+}
+
+/// Builder / explicit config for [`InMemoryGateway`] (tests + env wiring).
+#[derive(Debug, Clone)]
+pub struct GatewayConfig {
+    pub turn_delay: Duration,
+    pub vnc_mode: VncMode,
+    pub attach_mode: AttachMode,
+    pub attach_root: PathBuf,
+    pub attach_ttl: Duration,
+    pub vnc_public_base: String,
+    pub vnc_upstream: Option<String>,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            turn_delay: Duration::from_millis(DEFAULT_TURN_DELAY_MS),
+            vnc_mode: VncMode::Stub,
+            attach_mode: AttachMode::Memory,
+            attach_root: PathBuf::from(DEFAULT_ATTACH_ROOT),
+            attach_ttl: Duration::from_secs(DEFAULT_ATTACH_TTL_SECS),
+            vnc_public_base: DEFAULT_VNC_STUB_BASE.to_string(),
+            vnc_upstream: None,
+        }
+    }
+}
+
+impl GatewayConfig {
+    /// Read modes from process env; safe defaults keep CI stub+memory green.
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(v) = std::env::var(ENV_VNC_MODE) {
+            c.vnc_mode = VncMode::parse(&v);
+        }
+        if let Ok(v) = std::env::var(ENV_ATTACH_MODE) {
+            c.attach_mode = AttachMode::parse(&v);
+        }
+        if let Ok(v) = std::env::var(ENV_ATTACH_ROOT) {
+            if !v.trim().is_empty() {
+                c.attach_root = PathBuf::from(v);
+            }
+        }
+        if let Ok(v) = std::env::var(ENV_ATTACH_TTL_SECS) {
+            if let Ok(secs) = v.parse::<u64>() {
+                c.attach_ttl = Duration::from_secs(secs);
+            }
+        }
+        if let Ok(v) = std::env::var("ATLAS_VNC_STUB_BASE") {
+            c.vnc_public_base = v.trim_end_matches('/').to_string();
+        }
+        if let Ok(v) = std::env::var(ENV_VNC_UPSTREAM) {
+            let t = v.trim().to_string();
+            if !t.is_empty() {
+                c.vnc_upstream = Some(t);
+            }
+        }
+        c
+    }
+
+    pub fn with_turn_delay(mut self, d: Duration) -> Self {
+        self.turn_delay = d;
+        self
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
@@ -120,11 +237,61 @@ pub struct TranscriptEntry {
     pub seq: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadMeta {
+    upload_id: String,
+    path: String,
+    filename: String,
+    bytes: u64,
+    created_at: i64,
+    state: String,
+    agent_id: String,
+}
+
 #[derive(Debug, Clone)]
 struct UploadRecord {
     path: String,
     filename: String,
     agent_id: String,
+    bytes: u64,
+    created_at: i64,
+    state: String,
+}
+
+impl UploadRecord {
+    fn to_meta(&self, upload_id: &str) -> UploadMeta {
+        UploadMeta {
+            upload_id: upload_id.to_string(),
+            path: self.path.clone(),
+            filename: self.filename.clone(),
+            bytes: self.bytes,
+            created_at: self.created_at,
+            state: self.state.clone(),
+            agent_id: self.agent_id.clone(),
+        }
+    }
+
+    fn from_meta(m: UploadMeta) -> (String, Self) {
+        (
+            m.upload_id,
+            Self {
+                path: m.path,
+                filename: m.filename,
+                agent_id: m.agent_id,
+                bytes: m.bytes,
+                created_at: m.created_at,
+                state: m.state,
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VncTokenRecord {
+    pub agent_id: String,
+    pub expires_at_ms: i64,
+    pub upstream: String,
 }
 
 #[derive(Debug, Default)]
@@ -147,9 +314,16 @@ struct Shared {
     pending: RwLock<HashMap<String, Arc<PendingTurn>>>,
     turn_delay: Duration,
     turn_tx: tokio::sync::broadcast::Sender<TurnFinishedHint>,
-    /// Base URL used when minting stub VNC descriptors (no trailing slash).
+    /// Public base URL for minted VNC URLs (no trailing slash).
     vnc_stub_base: String,
-    upload_root: std::path::PathBuf,
+    /// Temp root used in memory mode (and as scratch).
+    upload_root: PathBuf,
+    vnc_mode: VncMode,
+    attach_mode: AttachMode,
+    attach_root: PathBuf,
+    attach_ttl: Duration,
+    vnc_upstream: Option<String>,
+    vnc_tokens: RwLock<HashMap<String, VncTokenRecord>>,
 }
 
 /// In-memory gateway stub.
@@ -174,10 +348,16 @@ impl Default for InMemoryGateway {
 
 impl InMemoryGateway {
     pub fn new() -> Self {
-        Self::with_turn_delay(Duration::from_millis(DEFAULT_TURN_DELAY_MS))
+        Self::with_config(GatewayConfig::from_env())
     }
 
     pub fn with_turn_delay(turn_delay: Duration) -> Self {
+        // Preserve prior test helper: turn delay override + env modes
+        // (defaults stub+memory so p5_smoke stays green without env).
+        Self::with_config(GatewayConfig::from_env().with_turn_delay(turn_delay))
+    }
+
+    pub fn with_config(cfg: GatewayConfig) -> Self {
         let (turn_tx, _) = tokio::sync::broadcast::channel(64);
         let mut agents = HashMap::new();
         agents.insert(
@@ -202,15 +382,25 @@ impl InMemoryGateway {
         );
         let mut next_entry_seq = HashMap::new();
         next_entry_seq.insert(DEFAULT_AGENT_ID.to_string(), 2);
+
         let upload_root = std::env::temp_dir().join(format!(
             "atlas-bot-uploads-{}",
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&upload_root);
-        let vnc_stub_base = std::env::var("ATLAS_VNC_STUB_BASE")
-            .unwrap_or_else(|_| DEFAULT_VNC_STUB_BASE.to_string())
-            .trim_end_matches('/')
-            .to_string();
+
+        let attach_root = cfg.attach_root.clone();
+        if cfg.attach_mode == AttachMode::Disk {
+            let _ = std::fs::create_dir_all(&attach_root);
+        }
+
+        let mut uploads = HashMap::new();
+        if cfg.attach_mode == AttachMode::Disk {
+            load_disk_uploads(&attach_root, &mut uploads);
+        }
+
+        let vnc_stub_base = cfg.vnc_public_base.trim_end_matches('/').to_string();
+
         Self {
             shared: Arc::new(Shared {
                 inner: RwLock::new(Inner {
@@ -218,20 +408,42 @@ impl InMemoryGateway {
                     transcripts,
                     next_entry_seq,
                     next_agent_n: 2,
-                    uploads: HashMap::new(),
+                    uploads,
                 }),
                 invokes: AtomicU64::new(0),
                 pending: RwLock::new(HashMap::new()),
-                turn_delay,
+                turn_delay: cfg.turn_delay,
                 turn_tx,
                 vnc_stub_base,
                 upload_root,
+                vnc_mode: cfg.vnc_mode,
+                attach_mode: cfg.attach_mode,
+                attach_root,
+                attach_ttl: cfg.attach_ttl,
+                vnc_upstream: cfg.vnc_upstream,
+                vnc_tokens: RwLock::new(HashMap::new()),
             }),
         }
     }
 
     pub fn vnc_stub_base(&self) -> &str {
         &self.shared.vnc_stub_base
+    }
+
+    pub fn attach_mode(&self) -> AttachMode {
+        self.shared.attach_mode
+    }
+
+    pub fn vnc_mode(&self) -> VncMode {
+        self.shared.vnc_mode
+    }
+
+    pub fn attach_root(&self) -> &Path {
+        &self.shared.attach_root
+    }
+
+    pub fn vnc_upstream(&self) -> Option<&str> {
+        self.shared.vnc_upstream.as_deref()
     }
 
     pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<TurnFinishedHint> {
@@ -554,6 +766,7 @@ impl InMemoryGateway {
         agent_id: &str,
         args: &Value,
     ) -> Result<Value, GatewayError> {
+        self.sweep_expired_uploads().await;
         let args_json = serde_json::to_vec(args).unwrap_or_default();
         if args_json.len() > UPLOAD_ARGS_JSON_MAX_BYTES {
             return Err(GatewayError::rejected(
@@ -591,23 +804,33 @@ impl InMemoryGateway {
             ));
         }
         let upload_id = format!("upl_{}", Uuid::new_v4().simple());
-        let dir = self.shared.upload_root.join(&upload_id);
+        let created_at = now_ms();
+        let root = match self.shared.attach_mode {
+            AttachMode::Disk => self.shared.attach_root.clone(),
+            AttachMode::Memory => self.shared.upload_root.clone(),
+        };
+        let dir = root.join(&upload_id);
         std::fs::create_dir_all(&dir)
             .map_err(|e| GatewayError::Upstream(format!("mkdir: {e}")))?;
         let file_path = dir.join(&safe_name);
         std::fs::write(&file_path, &bytes)
             .map_err(|e| GatewayError::Upstream(format!("write: {e}")))?;
         let path = file_path.to_string_lossy().to_string();
+        let rec = UploadRecord {
+            path: path.clone(),
+            filename: safe_name,
+            agent_id: agent_id.to_string(),
+            bytes: bytes.len() as u64,
+            created_at,
+            state: "ready".to_string(),
+        };
+        if self.shared.attach_mode == AttachMode::Disk {
+            write_disk_meta(&dir, &rec.to_meta(&upload_id))
+                .map_err(|e| GatewayError::Upstream(format!("meta: {e}")))?;
+        }
         {
             let mut guard = self.shared.inner.write().await;
-            guard.uploads.insert(
-                upload_id.clone(),
-                UploadRecord {
-                    path: path.clone(),
-                    filename: safe_name,
-                    agent_id: agent_id.to_string(),
-                },
-            );
+            guard.uploads.insert(upload_id.clone(), rec);
         }
         Ok(json!({
             "path": path,
@@ -616,6 +839,7 @@ impl InMemoryGateway {
     }
 
     async fn attach_upload(&self, agent_id: &str, args: &Value) -> Result<Value, GatewayError> {
+        self.sweep_expired_uploads().await;
         let upload_id = args
             .get("uploadId")
             .and_then(|v| v.as_str())
@@ -624,12 +848,12 @@ impl InMemoryGateway {
             .ok_or_else(|| GatewayError::InvalidArgs("missing uploadId".into()))?;
         let guard = self.shared.inner.read().await;
         match guard.uploads.get(upload_id) {
-            Some(rec) => Ok(json!({
+            Some(rec) if !is_expired(rec.created_at, self.shared.attach_ttl) => Ok(json!({
                 "path": rec.path,
                 "filename": rec.filename,
                 "agentId": rec.agent_id,
             })),
-            None => {
+            Some(_) | None => {
                 let _ = agent_id;
                 Err(GatewayError::rejected(
                     xai_tool_protocol::COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
@@ -638,23 +862,77 @@ impl InMemoryGateway {
         }
     }
 
+    async fn sweep_expired_uploads(&self) {
+        let ttl = self.shared.attach_ttl;
+        let disk = self.shared.attach_mode == AttachMode::Disk;
+        let attach_root = self.shared.attach_root.clone();
+        let mut guard = self.shared.inner.write().await;
+        let expired: Vec<String> = guard
+            .uploads
+            .iter()
+            .filter(|(_, r)| is_expired(r.created_at, ttl))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in expired {
+            if let Some(rec) = guard.uploads.remove(&id) {
+                if disk {
+                    let dir = attach_root.join(&id);
+                    let _ = std::fs::remove_dir_all(&dir);
+                    let _ = std::fs::remove_file(Path::new(&rec.path));
+                }
+            }
+        }
+    }
+
     async fn mint_vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
         if agent_id.trim().is_empty() {
             return Err(GatewayError::InvalidArgs("missing agentId".into()));
         }
-        let expires_hint = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64 + 5 * 60 * 1000)
-            .unwrap_or(0);
-        let vnc_url = format!(
-            "{}/vnc-stub?agent={}",
-            self.shared.vnc_stub_base,
-            urlencoding_lite(agent_id)
-        );
+        let expires_hint = now_ms() + DEFAULT_VNC_TOKEN_TTL_MS;
+
+        let use_proxy = self.shared.vnc_mode == VncMode::Proxy
+            && self.shared.vnc_upstream.is_some();
+
+        let vnc_url = if use_proxy {
+            let upstream = self.shared.vnc_upstream.clone().unwrap();
+            let token = format!("tok_{}", Uuid::new_v4().simple());
+            {
+                let mut tokens = self.shared.vnc_tokens.write().await;
+                // Drop expired tokens opportunistically.
+                tokens.retain(|_, t| t.expires_at_ms > now_ms());
+                tokens.insert(
+                    token.clone(),
+                    VncTokenRecord {
+                        agent_id: agent_id.to_string(),
+                        expires_at_ms: expires_hint,
+                        upstream,
+                    },
+                );
+            }
+            format!("{}/vnc/{token}/", self.shared.vnc_stub_base)
+        } else {
+            // stub mode, or proxy without upstream → degrade to stub page
+            // (never claim a real desktop).
+            format!(
+                "{}/vnc-stub?agent={}",
+                self.shared.vnc_stub_base,
+                urlencoding_lite(agent_id)
+            )
+        };
         Ok(json!({
             "vncUrl": vnc_url,
             "expiresHint": expires_hint,
         }))
+    }
+
+    /// Resolve a minted VNC proxy token for HTTP handlers.
+    pub async fn lookup_vnc_token(&self, token: &str) -> Result<VncTokenRecord, VncTokenError> {
+        let tokens = self.shared.vnc_tokens.read().await;
+        match tokens.get(token) {
+            Some(t) if t.expires_at_ms > now_ms() => Ok(t.clone()),
+            Some(_) => Err(VncTokenError::Expired),
+            None => Err(VncTokenError::Unknown),
+        }
     }
 
     async fn dispatch(&self, agent_id: &str, name: &str, args: Value) -> Result<Value, GatewayError> {
@@ -669,6 +947,50 @@ impl InMemoryGateway {
             other => Err(GatewayError::UnknownMethod(other.to_string())),
         }
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn is_expired(created_at_ms: i64, ttl: Duration) -> bool {
+    let age_ms = now_ms().saturating_sub(created_at_ms);
+    age_ms >= ttl.as_millis() as i64
+}
+
+fn write_disk_meta(dir: &Path, meta: &UploadMeta) -> Result<(), String> {
+    let p = dir.join("meta.json");
+    let s = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
+    std::fs::write(p, s).map_err(|e| e.to_string())
+}
+
+fn load_disk_uploads(root: &Path, into: &mut HashMap<String, UploadRecord>) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let meta_path = ent.path().join("meta.json");
+        if !meta_path.is_file() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&meta_path) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<UploadMeta>(&bytes) else {
+            continue;
+        };
+        let (id, rec) = UploadRecord::from_meta(meta);
+        into.insert(id, rec);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum VncTokenError {
+    Unknown,
+    Expired,
 }
 
 /// Minimal query escaping for agent id in stub URLs (no extra dep).
@@ -768,9 +1090,8 @@ struct VncStubQuery {
     agent: Option<String>,
 }
 
-async fn http_vnc_stub(Query(q): Query<VncStubQuery>) -> Html<String> {
-    let agent = q.agent.unwrap_or_else(|| "(unknown)".into());
-    Html(format!(
+fn vnc_stub_html(agent: &str) -> String {
+    format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>atlas-bot VNC stub</title>
 <style>body{{font-family:system-ui;background:#0f1419;color:#e7ecf3;padding:24px}}
@@ -780,7 +1101,43 @@ code{{background:#1a2332;padding:2px 6px;border-radius:4px}}</style></head>
 <p>Agent: <code>{agent}</code></p>
 <p>This is a short-lived stub page — not a real noVNC session.</p>
 </body></html>"#
-    ))
+    )
+}
+
+fn vnc_proxy_mock_html(agent: &str, upstream: &str, token: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>atlas-bot VNC proxy</title>
+<style>body{{font-family:system-ui;background:#0f1419;color:#e7ecf3;padding:24px}}
+code{{background:#1a2332;padding:2px 6px;border-radius:4px}}</style></head>
+<body>
+<h1>P5 VNC proxy (mock)</h1>
+<p>Agent: <code>{agent}</code></p>
+<p>Upstream RFB: <code>{upstream}</code></p>
+<p>Token: <code>{token}</code></p>
+<p>This page documents a tokenized proxy session. Full noVNC + websockify is
+optional (see docs/P5-real-runbook.md / Docker). Evidence path for CI is this
+200 OK mock — not a live desktop framebuffer.</p>
+<p data-atlas-vnc="proxy-mock" data-upstream="{upstream}">proxy-mock upstream={upstream}</p>
+</body></html>"#
+    )
+}
+
+async fn http_vnc_stub(Query(q): Query<VncStubQuery>) -> Html<String> {
+    let agent = q.agent.unwrap_or_else(|| "(unknown)".into());
+    Html(vnc_stub_html(&agent))
+}
+
+async fn http_vnc_proxy(
+    State(st): State<HttpState>,
+    AxumPath(token): AxumPath<String>,
+) -> Response {
+    let token = token.trim_end_matches('/').to_string();
+    match st.gw.lookup_vnc_token(&token).await {
+        Ok(rec) => Html(vnc_proxy_mock_html(&rec.agent_id, &rec.upstream, &token)).into_response(),
+        Err(VncTokenError::Expired) => (StatusCode::GONE, "vnc token expired").into_response(),
+        Err(VncTokenError::Unknown) => (StatusCode::FORBIDDEN, "vnc token unknown").into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -804,6 +1161,9 @@ pub fn http_router(gw: Arc<InMemoryGateway>) -> Router {
         .route("/invoke", post(http_invoke))
         .route("/vnc-descriptor", post(http_vnc_descriptor))
         .route("/vnc-stub", get(http_vnc_stub))
+        .route("/vnc/{token}/", get(http_vnc_proxy))
+        .route("/vnc/{token}", get(http_vnc_proxy))
+        .route("/healthz", get(|| async { "ok" }))
         .with_state(HttpState { gw: (*gw).clone() })
 }
 
@@ -1136,5 +1496,117 @@ mod tests {
             GatewayError::Rejected { reason, .. } => assert_eq!(reason, "args_too_large"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn disk_attach_persists_across_gateway_restart() {
+        let root = std::env::temp_dir().join(format!("atlas-p5r-disk-{}", Uuid::new_v4().simple()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = GatewayConfig {
+            attach_mode: AttachMode::Disk,
+            attach_root: root.clone(),
+            turn_delay: Duration::from_millis(10),
+            ..GatewayConfig::default()
+        };
+        let gw = InMemoryGateway::with_config(cfg.clone());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"disk-persist");
+        let up = gw
+            .invoke(
+                "agt_1",
+                "uploadAttachment",
+                json!({ "bytesBase64": b64, "filename": "persist.txt" }),
+            )
+            .await
+            .unwrap();
+        let upload_id = up["uploadId"].as_str().unwrap().to_string();
+        let path = up["path"].as_str().unwrap().to_string();
+        assert!(path.starts_with(root.to_string_lossy().as_ref()), "{path}");
+        assert!(Path::new(&path).is_file());
+        let meta = root.join(&upload_id).join("meta.json");
+        assert!(meta.is_file(), "missing meta.json");
+
+        // New gateway instance, same root → attach still works.
+        let gw2 = InMemoryGateway::with_config(cfg);
+        let att = gw2
+            .invoke(
+                "agt_1",
+                "attachUpload",
+                json!({ "uploadId": upload_id }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(att["path"], path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn disk_ttl_expires_to_not_found() {
+        let root = std::env::temp_dir().join(format!("atlas-p5r-ttl-{}", Uuid::new_v4().simple()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = GatewayConfig {
+            attach_mode: AttachMode::Disk,
+            attach_root: root.clone(),
+            attach_ttl: Duration::from_millis(30),
+            turn_delay: Duration::from_millis(10),
+            ..GatewayConfig::default()
+        };
+        let gw = InMemoryGateway::with_config(cfg);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"ttl");
+        let up = gw
+            .invoke(
+                "agt_1",
+                "uploadAttachment",
+                json!({ "bytesBase64": b64, "filename": "ttl.txt" }),
+            )
+            .await
+            .unwrap();
+        let upload_id = up["uploadId"].as_str().unwrap().to_string();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let err = gw
+            .invoke(
+                "agt_1",
+                "attachUpload",
+                json!({ "uploadId": upload_id }),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            GatewayError::Rejected { reason, .. } => assert_eq!(reason, "attachment_not_found"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn vnc_proxy_mints_token_url_with_upstream() {
+        let cfg = GatewayConfig {
+            vnc_mode: VncMode::Proxy,
+            vnc_upstream: Some("127.0.0.1:5900".into()),
+            vnc_public_base: "http://127.0.0.1:8787".into(),
+            turn_delay: Duration::from_millis(10),
+            ..GatewayConfig::default()
+        };
+        let gw = InMemoryGateway::with_config(cfg);
+        let v = gw.vnc_descriptor("agt_1").await.unwrap();
+        let url = v["vncUrl"].as_str().unwrap();
+        assert!(url.contains("/vnc/tok_"), "{url}");
+        assert!(url.ends_with('/'), "{url}");
+        assert!(!url.contains("vnc-stub"), "{url}");
+    }
+
+    #[tokio::test]
+    async fn vnc_proxy_without_upstream_degrades_to_stub() {
+        let cfg = GatewayConfig {
+            vnc_mode: VncMode::Proxy,
+            vnc_upstream: None,
+            turn_delay: Duration::from_millis(10),
+            ..GatewayConfig::default()
+        };
+        let gw = InMemoryGateway::with_config(cfg);
+        let v = gw.vnc_descriptor("agt_1").await.unwrap();
+        let url = v["vncUrl"].as_str().unwrap();
+        assert!(url.contains("/vnc-stub?agent=agt_1"), "{url}");
     }
 }

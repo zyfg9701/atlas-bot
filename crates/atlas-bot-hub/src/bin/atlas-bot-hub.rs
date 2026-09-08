@@ -5,8 +5,10 @@
 //! - `ATLAS_GATEWAY_URL` — if set, use HTTP gateway at this base URL;
 //!   otherwise embed an in-process [`InMemoryGateway`] stub.
 //! - `ATLAS_GATEWAY_HTTP_BIND` — embedded stub HTTP bind (default
-//!   `127.0.0.1:8787` for P5 VNC stub). Set `off` to disable. For scheme B,
+//!   `127.0.0.1:8787` for P5 VNC stub/proxy). Set `off` to disable. For scheme B,
 //!   run `atlas-bot-gateway` separately and set `ATLAS_GATEWAY_URL`.
+//! - `ATLAS_VNC_MODE` / `ATLAS_VNC_UPSTREAM` / `ATLAS_ATTACH_MODE` /
+//!   `ATLAS_ATTACH_ROOT` — see docs/P5-real-runbook.md (read by InMemoryGateway).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -63,7 +65,7 @@ async fn main() {
                     warn!("gateway HTTP exited: {e}");
                 }
             });
-            info!(%addr, "embedded gateway HTTP enabled (VNC stub /vnc-stub)");
+            info!(%addr, "embedded gateway HTTP enabled (VNC stub and /vnc/<token>)");
         }
     }
 
