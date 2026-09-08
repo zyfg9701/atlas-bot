@@ -1,4 +1,4 @@
-//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P3.5).
+//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P3.5 + I1 auth gate).
 //!
 //! Env:
 //! - `ATLAS_HUB_BIND` — default `127.0.0.1:7700`
@@ -9,14 +9,18 @@
 //!   run `atlas-bot-gateway` separately and set `ATLAS_GATEWAY_URL`.
 //! - `ATLAS_VNC_MODE` / `ATLAS_VNC_UPSTREAM` / `ATLAS_ATTACH_MODE` /
 //!   `ATLAS_ATTACH_ROOT` — see docs/P5-real-runbook.md (read by InMemoryGateway).
+//! - `ATLAS_AUTH_MODE` / `ATLAS_AUTH_JWT_SECRET` / `ATLAS_AUTH_ALLOWLIST` /
+//!   `ATLAS_OIDC_*` — see docs/idp-runbook.md (Hub inbound only).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use atlas_bot_gateway::{serve_http, Gateway, HttpGatewayClient, InMemoryGateway};
+use atlas_bot_hub::auth::{bearer_from_authorization, AuthConfig};
 use atlas_bot_hub::{Hub, Session};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -29,6 +33,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 struct AppState {
     hub: Arc<Hub>,
+    auth: AuthConfig,
 }
 
 #[tokio::main]
@@ -41,6 +46,8 @@ async fn main() {
         .unwrap_or_else(|_| "127.0.0.1:7700".into())
         .parse()
         .expect("ATLAS_HUB_BIND");
+
+    let auth = AuthConfig::from_env();
 
     let (hub, gw_opt): (Arc<Hub>, Option<Arc<InMemoryGateway>>) =
         if let Ok(url) = std::env::var("ATLAS_GATEWAY_URL") {
@@ -73,21 +80,37 @@ async fn main() {
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState { hub });
+        .with_state(AppState { hub, auth });
 
     let listener = tokio::net::TcpListener::bind(bind).await.expect("bind");
     info!(%bind, "atlas-bot-hub listening (WS /ws)");
     axum::serve(listener, app).await.expect("serve");
 }
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(st): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, st.hub))
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Credential channel: Authorization: Bearer only (also accepted on WS upgrade).
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| bearer_from_authorization(Some(v)));
+    let hub = Arc::clone(&st.hub);
+    let auth = st.auth.clone();
+    ws.on_upgrade(move |socket| handle_socket(socket, hub, auth, bearer))
 }
 
-async fn handle_socket(socket: WebSocket, hub: Arc<Hub>) {
+async fn handle_socket(
+    socket: WebSocket,
+    hub: Arc<Hub>,
+    auth: AuthConfig,
+    bearer: Option<String>,
+) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let mut session = Session::new(Arc::clone(&hub));
+    let mut session = Session::with_auth(Arc::clone(&hub), auth, bearer);
     let mut bus = hub.subscribe_outbound();
 
     let writer = tokio::spawn(async move {

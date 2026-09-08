@@ -9,6 +9,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,13 +22,15 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+use crate::auth::{authenticate, AuthConfig, AuthContext, AuthError};
 use xai_tool_protocol::{
     BotCommandParams, BotEmptyResult, BotEventEnvelope, BotRelayError, BotRelayErrorCode,
     BotRelayErrorDetail, BotRosterEntry, BotRosterResult, BotRunState, BotStatusResult,
     BotSubscribeParams, BotTranscriptOffboxParams, BotTranscriptOffboxResult,
     BotVncDescriptorParams, BotVncDescriptorResult, ConnectionId, ConnectionKind, HelloAckMsg,
     HelloMsg, HubChannel, HubTurnFinishedEvent, JsonRpcError, JsonRpcId, JsonRpcNotification,
-    JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, Method, ResponseOutcome, UserId,
+    JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, Method, ResponseOutcome,
     BOT_RELAY_CAPABILITIES, COMMAND_REJECTED_AGENT_ID_MISMATCH, COMMAND_REJECTED_ARGS_INVALID,
     COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD, COMMAND_REJECTED_NOT_YET_ENABLED, PROTOCOL_VERSION,
 };
@@ -244,7 +248,11 @@ impl Hub {
         }
     }
 
-    pub fn hello_ack(&self, hello: &HelloMsg) -> Result<HelloAckMsg, BotRelayError> {
+    pub fn hello_ack(
+        &self,
+        hello: &HelloMsg,
+        auth: &AuthContext,
+    ) -> Result<HelloAckMsg, BotRelayError> {
         if hello.kind != ConnectionKind::BotClient {
             return Err(BotRelayError {
                 code: BotRelayErrorCode::UpstreamError,
@@ -257,10 +265,9 @@ impl Hub {
         }
         let connection_id =
             ConnectionId::new(format!("conn_{}", Uuid::new_v4())).expect("valid id");
-        let user_id = UserId::new("user_local_dev").expect("valid id");
         Ok(HelloAckMsg {
             connection_id,
-            user_id,
+            user_id: auth.user_id.clone(),
             computer_hub_version: HUB_VERSION.to_string(),
             supported_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
             capabilities: BOT_RELAY_CAPABILITIES
@@ -408,7 +415,9 @@ impl Hub {
                 JsonRpcResponse::err(id, not_yet_enabled(&req.method))
             }
             Some(Method::Hello) => match serde_json::from_value::<HelloMsg>(req.params) {
-                Ok(hello) => match self.hello_ack(&hello) {
+                // Direct handle_rpc callers (unit tests) get dev identity.
+                // Live WS sessions authenticate in Session before hello_ack.
+                Ok(hello) => match self.hello_ack(&hello, &AuthContext::dev()) {
                     Ok(ack) => {
                         self.register_connection(ack.connection_id.as_str()).await;
                         JsonRpcResponse::ok(id, serde_json::to_value(ack).unwrap())
@@ -685,15 +694,35 @@ pub struct Session {
     pub connection_id: String,
     pub hub: Arc<Hub>,
     hello_done: bool,
+    auth_config: AuthConfig,
+    bearer: Option<String>,
 }
 
 impl Session {
+    /// Default session: always `dev` (no Bearer). Binary reads env via
+    /// [`AuthConfig::from_env`] and [`Session::with_auth`]. Keeps existing
+    /// smokes green regardless of ambient `ATLAS_AUTH_MODE`.
     pub fn new(hub: Arc<Hub>) -> Self {
+        Self::with_auth(hub, AuthConfig::dev(), None)
+    }
+
+    /// Explicit auth gate inputs (tests + WS upgrade with `Authorization`).
+    pub fn with_auth(hub: Arc<Hub>, auth_config: AuthConfig, bearer: Option<String>) -> Self {
         Self {
             connection_id: String::new(),
             hub,
             hello_done: false,
+            auth_config,
+            bearer,
         }
+    }
+
+    fn gate_hello(&self, hello: &HelloMsg) -> Result<HelloAckMsg, JsonRpcError> {
+        let ctx = authenticate(&self.auth_config, self.bearer.as_deref())
+            .map_err(|e: AuthError| e.to_jsonrpc())?;
+        self.hub
+            .hello_ack(hello, &ctx)
+            .map_err(JsonRpcError::from)
     }
 
     pub async fn on_text(&mut self, text: &str) -> Vec<String> {
@@ -707,7 +736,7 @@ impl Session {
 
         if !self.hello_done && v.get("jsonrpc").is_none() && v.get("protocol_version").is_some() {
             match serde_json::from_value::<HelloMsg>(v) {
-                Ok(hello) => match self.hub.hello_ack(&hello) {
+                Ok(hello) => match self.gate_hello(&hello) {
                     Ok(ack) => {
                         self.connection_id = ack.connection_id.as_str().to_string();
                         self.hub.register_connection(&self.connection_id).await;
@@ -715,7 +744,8 @@ impl Session {
                         return vec![serde_json::to_string(&ack).unwrap()];
                     }
                     Err(e) => {
-                        return vec![serde_json::to_string(&JsonRpcError::from(e)).unwrap()];
+                        // Prefer fail-first-frame with closed-set unauthorized / link_*.
+                        return vec![serde_json::to_string(&e).unwrap()];
                     }
                 },
                 Err(e) => {
@@ -729,25 +759,51 @@ impl Session {
             match serde_json::from_value::<JsonRpcRequest<Value>>(v) {
                 Ok(req) => {
                     if !self.hello_done && req.method == Method::Hello.as_wire_str() {
-                        let resp = self.hub.handle_rpc("_pending", req).await;
-                        if let ResponseOutcome::Result(ref r) = resp.outcome {
-                            if let Ok(ack) = serde_json::from_value::<HelloAckMsg>(r.clone()) {
-                                self.connection_id = ack.connection_id.as_str().to_string();
-                                self.hello_done = true;
+                        match serde_json::from_value::<HelloMsg>(req.params.clone()) {
+                            Ok(hello) => match self.gate_hello(&hello) {
+                                Ok(ack) => {
+                                    self.connection_id = ack.connection_id.as_str().to_string();
+                                    self.hub.register_connection(&self.connection_id).await;
+                                    self.hello_done = true;
+                                    let resp = JsonRpcResponse::ok(
+                                        req.id,
+                                        serde_json::to_value(ack).unwrap(),
+                                    );
+                                    return vec![serde_json::to_string(&resp).unwrap()];
+                                }
+                                Err(e) => {
+                                    let resp = JsonRpcResponse::<Value>::err(req.id, e);
+                                    return vec![serde_json::to_string(&resp).unwrap()];
+                                }
+                            },
+                            Err(e) => {
+                                let resp = JsonRpcResponse::<Value>::err(
+                                    req.id,
+                                    JsonRpcError {
+                                        code: -32602,
+                                        message: "invalid_params".into(),
+                                        data: Some(json!({ "detail": e.to_string() })),
+                                    },
+                                );
+                                return vec![serde_json::to_string(&resp).unwrap()];
                             }
                         }
-                        return vec![serde_json::to_string(&resp).unwrap()];
                     }
                     if !self.hello_done {
-                        let err = BotRelayError {
-                            code: BotRelayErrorCode::IdentityUnavailable,
-                            retryable: true,
-                            detail: BotRelayErrorDetail {
-                                upstream: Some("hello required".into()),
-                            },
-                            reason: None,
+                        // static/oidc without successful hello must not reach bot.command.
+                        let err = if self.auth_config.mode != crate::auth::AuthMode::Dev {
+                            crate::auth::unauthorized_error("hello required (auth gate)")
+                        } else {
+                            JsonRpcError::from(BotRelayError {
+                                code: BotRelayErrorCode::IdentityUnavailable,
+                                retryable: true,
+                                detail: BotRelayErrorDetail {
+                                    upstream: Some("hello required".into()),
+                                },
+                                reason: None,
+                            })
                         };
-                        let resp = JsonRpcResponse::<Value>::err(req.id, JsonRpcError::from(err));
+                        let resp = JsonRpcResponse::<Value>::err(req.id, err);
                         return vec![serde_json::to_string(&resp).unwrap()];
                     }
                     let resp = self.hub.handle_rpc(&self.connection_id, req).await;
