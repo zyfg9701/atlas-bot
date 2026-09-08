@@ -41,3 +41,13 @@ matches GPL or AGPL (case-insensitive).
 
 Run locally:
   ./tools/license-check/check.sh
+
+========================================================================
+Optional operator components (not vendored)
+========================================================================
+
+noVNC / websockify are NOT vendored in this repository for P5 实装.
+Operators may run a separate Docker noVNC image against ATLAS_VNC_UPSTREAM
+(see docs/P5-real-runbook.md). If a future change vendors those trees,
+add license entries here before merge.
+

@@ -39,3 +39,9 @@ RUST_LOG=info cargo run -p atlas-bot-hub
 - VNC: placeholder HTML only (`ATLAS_VNC_STUB_BASE` overrides).
 - Attachments: temp stub disk; attachUpload maps prior uploadId only.
 - CLI gateway may return gateway/unknown-method for VNC/upload (use stub).
+
+## P5 实装 (disk + VNC proxy)
+
+See [P5-real-runbook.md](./P5-real-runbook.md) for `ATLAS_VNC_MODE` /
+`ATLAS_ATTACH_MODE`, disk TTL, and proxy mock Evidence.
+
