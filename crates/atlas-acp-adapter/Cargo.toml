@@ -1,0 +1,30 @@
+[package]
+name = "atlas-acp-adapter"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "α minimal ACP JSON-RPC adapter (:8790) → Hub bot_client; subset only, not full ACP"
+
+[[bin]]
+name = "atlas-acp-adapter"
+path = "src/main.rs"
+
+[dependencies]
+atlas-bot-cli = { path = "../atlas-bot-cli" }
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+atlas-bot-gateway = { path = "../atlas-bot-gateway" }
+atlas-bot-hub = { path = "../atlas-bot-hub" }
+tokio-tungstenite = "0.26"
+url = "2"

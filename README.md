@@ -2,7 +2,7 @@
 
 Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gateway.
 
-## Status (P6 β′ in progress on branch)
+## Status (α ACP adapter on branch; P6 β′ on main)
 
 - Monorepo + vendored `xai-tool-protocol` @ `a549186d…`
 - **Hub** WebSocket JSON-RPC (`crates/atlas-bot-hub`) — cold offbox + hot `bot.vncDescriptor`
@@ -18,8 +18,9 @@ Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gatewa
 | `crates/atlas-bot-hub` | Computer Hub WS binary + lib |
 | `crates/atlas-bot-gateway` | Stub + CLI/OpenAI gateway backends |
 | `crates/atlas-bot-cli` | P6 β′ thin Bot-Relay CLI (`bot_client` → Hub WS; ≠ ACP) |
+| `crates/atlas-acp-adapter` | α minimal ACP subset adapter (`:8790` → Hub bot_client) |
 | `clients/pc/` | PC bot_client (Tauri 2 + TS) |
-| `docs/P1-runbook.md` … `docs/P6-runbook.md` | Phase runbooks |
+| `docs/P1-runbook.md` … `docs/P6-runbook.md` / `P6-alpha-runbook.md` | Phase runbooks |
 | `docs/SOURCE_REV.md` | Upstream pin |
 
 ## Quick check
@@ -29,6 +30,7 @@ cargo test -p xai-tool-protocol --test bot_relay_conformance
 cargo test -p atlas-bot-hub -p atlas-bot-gateway
 cargo test -p atlas-bot-hub --test p5_smoke -- --nocapture   # SMOKE_OK p5 …
 cargo test -p atlas-bot-cli --test p6_smoke -- --nocapture  # SMOKE_OK p6 …
+cargo test -p atlas-acp-adapter --test alpha_smoke -- --nocapture  # SMOKE_OK alpha …
 cargo run -p atlas-bot-hub
 ```
 
