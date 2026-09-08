@@ -35,6 +35,8 @@ const KNOWN_CODES: &[&str] = &[
     "link_state_unavailable",
     "upstream_error",
     "forbidden",
+    "unauthorized",
+    "link_required",
 ];
 
 #[derive(Debug, Error)]
@@ -150,12 +152,45 @@ pub struct HubClient {
 }
 
 impl HubClient {
+    /// Connect without Authorization (Hub `dev` / no-auth smoke).
     pub async fn connect(url: &str) -> Result<Self, CliError> {
-        // Validate early; connect_async accepts &str / String.
+        Self::connect_with_bearer(url, None).await
+    }
+
+    /// Connect with optional `Authorization: Bearer` on the WS upgrade.
+    pub async fn connect_with_bearer(
+        url: &str,
+        bearer: Option<&str>,
+    ) -> Result<Self, CliError> {
         let _ = Url::parse(url)?;
-        let (ws, _) = connect_async(url.to_string())
-            .await
-            .map_err(|e| CliError::Ws(e.to_string()))?;
+        let ws = if let Some(token) = bearer {
+            let uri: http::Uri = url
+                .parse()
+                .map_err(|e: http::uri::InvalidUri| CliError::Message(e.to_string()))?;
+            let host = uri
+                .authority()
+                .map(|a| a.as_str().to_string())
+                .unwrap_or_else(|| "127.0.0.1".into());
+            let req = http::Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("host", host)
+                .header("connection", "Upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(())
+                .map_err(|e| CliError::Message(e.to_string()))?;
+            let (ws, _) = connect_async(req)
+                .await
+                .map_err(|e| CliError::Ws(e.to_string()))?;
+            ws
+        } else {
+            let (ws, _) = connect_async(url.to_string())
+                .await
+                .map_err(|e| CliError::Ws(e.to_string()))?;
+            ws
+        };
         Self::from_ws(url.to_string(), ws).await
     }
 
@@ -192,12 +227,24 @@ impl HubClient {
                 let Ok(v) = serde_json::from_str::<Value>(&text) else {
                     continue;
                 };
-                // hello_ack (no jsonrpc)
-                if v.get("jsonrpc").is_none() && v.get("connection_id").is_some() {
-                    if let Some(tx) = hello_slot.lock().await.take() {
-                        let _ = tx.send(Ok(v));
+                // hello_ack (no jsonrpc) — success has connection_id;
+                // auth failure is a bare JsonRpcError (message=unauthorized).
+                if v.get("jsonrpc").is_none() {
+                    if v.get("connection_id").is_some() {
+                        if let Some(tx) = hello_slot.lock().await.take() {
+                            let _ = tx.send(Ok(v));
+                        }
+                        continue;
                     }
-                    continue;
+                    if v.get("message").and_then(|m| m.as_str()) == Some("unauthorized")
+                        || v.get("code").and_then(|c| c.as_i64()) == Some(-32002)
+                        || v.get("message").and_then(|m| m.as_str()) == Some("link_required")
+                    {
+                        if let Some(tx) = hello_slot.lock().await.take() {
+                            let _ = tx.send(Err(normalize_error(&v)));
+                        }
+                        continue;
+                    }
                 }
                 if v.get("jsonrpc") == Some(&json!("2.0")) && v.get("id").is_some() {
                     let id = match &v["id"] {

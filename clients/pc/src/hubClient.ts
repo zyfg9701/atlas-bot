@@ -69,6 +69,8 @@ const KNOWN_CODES = new Set([
   "link_state_unavailable",
   "upstream_error",
   "forbidden",
+  "unauthorized",
+  "link_required",
 ]);
 
 /** Closed-set command_rejected reasons PC must surface (P5 attachments + prior). */
@@ -144,6 +146,12 @@ export function sortEventsBySeq(events: BotEventEnvelope[]): BotEventEnvelope[] 
   });
 }
 
+export interface ConnectOptions {
+  /** Bearer token (without "Bearer " prefix). Browser WS cannot set Authorization —
+   * production PC uses Tauri `connect_ws`; this field is stored for Tauri path / paste. */
+  authorization?: string;
+}
+
 export class HubClient {
   private ws: WebSocket | null = null;
   private nextId = 1;
@@ -154,10 +162,20 @@ export class HubClient {
   /** Per-agent last seen seq — for UI sort only, never gap→resync. */
   private lastSeq = new Map<string, number>();
   private subscribed = new Set<string>();
+  /** Optional bearer for Tauri rust WS / paste UX (not sent by browser WebSocket). */
+  private authorization?: string;
 
   constructor(url: string = DEFAULT_HUB_WS, handlers: HubClientHandlers = {}) {
     this.url = url;
     this.handlers = handlers;
+  }
+
+  setAuthorization(token?: string) {
+    this.authorization = token || undefined;
+  }
+
+  getAuthorization(): string | undefined {
+    return this.authorization;
   }
 
   get connectionState(): ConnState {
@@ -181,12 +199,29 @@ export class HubClient {
     this.handlers.onLog?.(level, msg, data);
   }
 
-  connect(): Promise<HelloAck> {
+  /**
+   * Connect. Options.authorization is stored; browser WebSocket cannot set
+   * Authorization headers — call Tauri `connect_ws` from UI when token is set.
+   * Under Hub `dev`, connect without a token as before.
+   */
+  connect(opts?: ConnectOptions): Promise<HelloAck> {
+    if (opts?.authorization !== undefined) {
+      this.setAuthorization(opts.authorization);
+    }
     this.disconnect();
     this.setState("connecting");
     return new Promise((resolve, reject) => {
       let settled = false;
       try {
+        // Browser cannot attach Authorization. If a bearer is required, the
+        // Tauri path must be used (see src-tauri connect_ws). For vite/dev
+        // without Tauri, we still open a plain WS (Hub auth mode=dev).
+        if (this.authorization) {
+          this.log(
+            "warn",
+            "bearer set but browser WebSocket cannot send Authorization — use Tauri connect_ws for oidc/static",
+          );
+        }
         this.ws = new WebSocket(this.url);
       } catch (e) {
         this.setState("error", String(e));
