@@ -5,7 +5,7 @@
 > methods. It is **not** an ACP adapter, **not** a vendor of `xai-acp-lib` /
 > `atlas-relay-demo`, and **not** 100% compatible with the official `atlas`
 > binary (which speaks ACP). Scheme **α** (official atlas zero-change ACP
-> adapter on a separate port) is **not done** in P6.
+> adapter on a separate port) lives in `docs/P6-alpha-runbook.md` / `crates/atlas-acp-adapter` (separate from this β′ page).
 
 Baseline: `main` @ `00b51f4` (P5 + CI). Branch: `p6-cli-bridge`.
 
@@ -76,9 +76,9 @@ Point Hub at a running gateway (`ATLAS_GATEWAY_URL=http://127.0.0.1:8787`) and u
 
 1. **Binary / install:** crate binary name `atlas-bot-cli`; run via `cargo run -p atlas-bot-cli` or install with `cargo install --path crates/atlas-bot-cli`.
 2. **interrupt:** implemented (`interruptAgentRun`). Against idle agent returns `hadActiveRun=false` (honest; never fakes success).
-3. **vs official `atlas`:** this is a **side-path Bot-Relay CLI**, not ACP; official `atlas` will not speak to `:7700` without a future α adapter (e.g. `:8790`).
-4. **α not done;** no real IdP; not a product shell replacement for PC.
+3. **vs official `atlas`:** this is a **side-path Bot-Relay CLI**, not ACP; official `atlas` should speak to α adapter `:8790` (see `docs/P6-alpha-runbook.md`), not Hub `:7700`.
+4. **α** is a separate deliverable; β′ remains. No real IdP; not a product shell replacement for PC.
 
 ## Out of scope (P6)
 
-α ACP adapter, whole-tree ACP vendor, stuffing ACP into `bot.*`, real IdP, store packages, group channels.
+Whole-tree ACP vendor, stuffing ACP into `bot.*`, real IdP, store packages, group channels. (α adapter: see `P6-alpha-runbook.md`.)

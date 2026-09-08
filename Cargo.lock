@@ -82,6 +82,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-acp-adapter"
+version = "0.1.0"
+dependencies = [
+ "atlas-bot-cli",
+ "atlas-bot-gateway",
+ "atlas-bot-hub",
+ "axum",
+ "clap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "atlas-bot-cli"
 version = "0.1.0"
 dependencies = [
