@@ -3,7 +3,7 @@
 //! - [`InMemoryGateway`] — echo stub (default when Hub has no `ATLAS_GATEWAY_URL`)
 //! - [`CliAgentGateway`] — scheme B Cursor/Atlas Agent CLI (`-p` print mode)
 //! - [`OpenAiCompatGateway`] — optional OpenAI-compat fallback
-//! - [`BoxSidecarGateway`] — R1 Box Sidecar (multi-turn + workspace tools)
+//! - [`BoxSidecarGateway`] — R1/R2 Box Sidecar (tools + streaming hints + VNC/attach)
 //!
 //! Hot commands: `listAgents`, `createAgent`, `sendPrompt`,
 //! `getAgentTranscriptTail`, `interruptAgentRun`, `uploadAttachment`,
@@ -24,6 +24,7 @@ pub mod openai_gateway;
 
 pub use box_sidecar::{
     BoxSidecarGateway, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE, DEFAULT_BOX_TURN_DELAY_MS,
+    TOOL_TRIGGER_LIST_DIR, TOOL_TRIGGER_READ_FILE, TOOL_TRIGGER_WRITE_FILE,
 };
 pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_TIMEOUT_MS};
 pub use openai_gateway::{
@@ -318,7 +319,7 @@ struct Shared {
     invokes: AtomicU64,
     pending: RwLock<HashMap<String, Arc<PendingTurn>>>,
     turn_delay: Duration,
-    turn_tx: tokio::sync::broadcast::Sender<TurnFinishedHint>,
+    turn_tx: tokio::sync::broadcast::Sender<RuntimeHint>,
     /// Public base URL for minted VNC URLs (no trailing slash).
     vnc_stub_base: String,
     /// Temp root used in memory mode (and as scratch).
@@ -344,6 +345,47 @@ pub struct TurnFinishedHint {
     pub user_text: String,
     pub entries: Vec<TranscriptEntry>,
 }
+
+/// R2 richer in-process hint (B2): tool / assistant delta / turn finished.
+/// Hub bridges these into `bot.event` channels `hub:tool`, `hub:assistant_delta`,
+/// and `hub:turn_finished`.
+#[derive(Debug, Clone)]
+pub enum RuntimeHint {
+    Tool {
+        agent_id: String,
+        tool: String,
+        summary: String,
+        exit_code: Option<i32>,
+    },
+    AssistantDelta {
+        agent_id: String,
+        text: String,
+    },
+    Finished {
+        agent_id: String,
+        preview: String,
+        user_text: String,
+        entries: Vec<TranscriptEntry>,
+    },
+}
+
+impl From<TurnFinishedHint> for RuntimeHint {
+    fn from(h: TurnFinishedHint) -> Self {
+        Self::Finished {
+            agent_id: h.agent_id,
+            preview: h.preview,
+            user_text: h.user_text,
+            entries: h.entries,
+        }
+    }
+}
+
+/// Documented R2 event channel strings (also accepted as HubUnknown).
+pub const CHANNEL_HUB_TOOL: &str = "hub:tool";
+pub const CHANNEL_HUB_ASSISTANT_DELTA: &str = "hub:assistant_delta";
+
+/// Box text tool size cap (READ_FILE / WRITE_FILE).
+pub const BOX_TEXT_FILE_MAX_BYTES: usize = 64 * 1024;
 
 impl Default for InMemoryGateway {
     fn default() -> Self {
@@ -451,11 +493,11 @@ impl InMemoryGateway {
         self.shared.vnc_upstream.as_deref()
     }
 
-    pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<TurnFinishedHint> {
+    pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<RuntimeHint> {
         self.shared.turn_tx.subscribe()
     }
 
-    pub fn turn_sender(&self) -> tokio::sync::broadcast::Sender<TurnFinishedHint> {
+    pub fn turn_sender(&self) -> tokio::sync::broadcast::Sender<RuntimeHint> {
         self.shared.turn_tx.clone()
     }
 
@@ -624,7 +666,7 @@ impl InMemoryGateway {
         }
         drop(guard);
         self.clear_pending(agent_id).await;
-        let _ = self.shared.turn_tx.send(TurnFinishedHint {
+        let _ = self.shared.turn_tx.send(RuntimeHint::Finished {
             agent_id: agent_id.to_string(),
             preview,
             user_text: prompt.to_string(),
@@ -890,44 +932,14 @@ impl InMemoryGateway {
     }
 
     async fn mint_vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
-        if agent_id.trim().is_empty() {
-            return Err(GatewayError::InvalidArgs("missing agentId".into()));
-        }
-        let expires_hint = now_ms() + DEFAULT_VNC_TOKEN_TTL_MS;
-
-        let use_proxy = self.shared.vnc_mode == VncMode::Proxy
-            && self.shared.vnc_upstream.is_some();
-
-        let vnc_url = if use_proxy {
-            let upstream = self.shared.vnc_upstream.clone().unwrap();
-            let token = format!("tok_{}", Uuid::new_v4().simple());
-            {
-                let mut tokens = self.shared.vnc_tokens.write().await;
-                // Drop expired tokens opportunistically.
-                tokens.retain(|_, t| t.expires_at_ms > now_ms());
-                tokens.insert(
-                    token.clone(),
-                    VncTokenRecord {
-                        agent_id: agent_id.to_string(),
-                        expires_at_ms: expires_hint,
-                        upstream,
-                    },
-                );
-            }
-            format!("{}/vnc/{token}/", self.shared.vnc_stub_base)
-        } else {
-            // stub mode, or proxy without upstream → degrade to stub page
-            // (never claim a real desktop).
-            format!(
-                "{}/vnc-stub?agent={}",
-                self.shared.vnc_stub_base,
-                urlencoding_lite(agent_id)
-            )
-        };
-        Ok(json!({
-            "vncUrl": vnc_url,
-            "expiresHint": expires_hint,
-        }))
+        let mut tokens = self.shared.vnc_tokens.write().await;
+        mint_vnc_descriptor_value(
+            agent_id,
+            &self.shared.vnc_stub_base,
+            self.shared.vnc_mode,
+            self.shared.vnc_upstream.as_deref(),
+            Some(&mut tokens),
+        )
     }
 
     /// Resolve a minted VNC proxy token for HTTP handlers.
@@ -954,14 +966,14 @@ impl InMemoryGateway {
     }
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-fn is_expired(created_at_ms: i64, ttl: Duration) -> bool {
+pub fn is_expired(created_at_ms: i64, ttl: Duration) -> bool {
     let age_ms = now_ms().saturating_sub(created_at_ms);
     age_ms >= ttl.as_millis() as i64
 }
@@ -999,7 +1011,7 @@ pub enum VncTokenError {
 }
 
 /// Minimal query escaping for agent id in stub URLs (no extra dep).
-fn urlencoding_lite(s: &str) -> String {
+pub fn urlencoding_lite(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -1011,6 +1023,48 @@ fn urlencoding_lite(s: &str) -> String {
     }
     out
 }
+
+/// Shared VNC descriptor mint (P5 + R2 Box). When `proxy` mode has an upstream
+/// and `tokens` is provided, a short-lived token URL is minted; otherwise stub.
+pub fn mint_vnc_descriptor_value(
+    agent_id: &str,
+    public_base: &str,
+    vnc_mode: VncMode,
+    vnc_upstream: Option<&str>,
+    tokens: Option<&mut HashMap<String, VncTokenRecord>>,
+) -> Result<Value, GatewayError> {
+    if agent_id.trim().is_empty() {
+        return Err(GatewayError::InvalidArgs("missing agentId".into()));
+    }
+    let base = public_base.trim_end_matches('/');
+    let expires_hint = now_ms() + DEFAULT_VNC_TOKEN_TTL_MS;
+    let use_proxy = vnc_mode == VncMode::Proxy && vnc_upstream.is_some() && tokens.is_some();
+    let vnc_url = if use_proxy {
+        let upstream = vnc_upstream.unwrap().to_string();
+        let token = format!("tok_{}", Uuid::new_v4().simple());
+        if let Some(map) = tokens {
+            map.retain(|_, t| t.expires_at_ms > now_ms());
+            map.insert(
+                token.clone(),
+                VncTokenRecord {
+                    agent_id: agent_id.to_string(),
+                    expires_at_ms: expires_hint,
+                    upstream,
+                },
+            );
+        }
+        format!("{base}/vnc/{token}/")
+    } else {
+        // stub mode, or proxy without upstream → stub page (never claim real desktop)
+        format!("{base}/vnc-stub?agent={}", urlencoding_lite(agent_id))
+    };
+    Ok(json!({
+        "vncUrl": vnc_url,
+        "expiresHint": expires_hint,
+    }))
+}
+
+
 
 #[async_trait]
 impl Gateway for InMemoryGateway {

@@ -1,8 +1,9 @@
-//! R1 Box Sidecar: long-lived in-process runtime behind Gateway HTTP.
+//! R1/R2 Box Sidecar: long-lived in-process runtime behind Gateway HTTP.
 //!
 //! Deterministic local responder with per-agent conversation history,
-//! workspace root (`ATLAS_BOX_WORKSPACE`), and a tiny tool whitelist
-//! (`LIST_DIR` / `RUN ls` / `RUN pwd`). Not grok-build; not a real LLM.
+//! workspace root (`ATLAS_BOX_WORKSPACE`), tool whitelist (LIST_DIR / READ /
+//! WRITE / RUN ls|pwd|cat|mkdir), streaming [`RuntimeHint`]s, and P5 VNC +
+//! attachments rooted under the agent workspace. Not grok-build; not a real LLM.
 //!
 //! Interrupt: cancel in-flight `sendPrompt` via oneshot; idle interrupt
 //! returns closed-set `command_rejected/no_active_run` (never fake success).
@@ -10,20 +11,26 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{
-    AgentRecord, Gateway, GatewayError, TranscriptEntry, TurnFinishedHint, DEFAULT_AGENT_ID,
-    DEFAULT_AGENT_NAME,
+    is_expired, mint_vnc_descriptor_value, now_ms, AgentRecord, Gateway, GatewayError, RuntimeHint,
+    TranscriptEntry, VncMode, VncTokenError, VncTokenRecord, ATTACHMENT_OBJECT_MAX_BYTES,
+    BOX_TEXT_FILE_MAX_BYTES, DEFAULT_AGENT_ID, DEFAULT_AGENT_NAME, DEFAULT_ATTACH_TTL_SECS,
+    DEFAULT_VNC_STUB_BASE, ENV_ATTACH_TTL_SECS, ENV_VNC_MODE, ENV_VNC_UPSTREAM,
+    UPLOAD_ARGS_JSON_MAX_BYTES,
 };
 
 /// Workspace root for agent subdirs.
@@ -35,10 +42,36 @@ pub const DEFAULT_BOX_TURN_DELAY_MS: u64 = 50;
 
 const DEFAULT_WORKSPACE: &str = "./data/box-workspace";
 
-/// Documented tool triggers (see runbook whitelist).
+/// Documented tool triggers (see runtime-deepen runbook).
 pub const TOOL_TRIGGER_LIST_DIR: &str = "LIST_DIR";
 pub const TOOL_TRIGGER_RUN_LS: &str = "RUN ls";
 pub const TOOL_TRIGGER_RUN_PWD: &str = "RUN pwd";
+pub const TOOL_TRIGGER_READ_FILE: &str = "READ_FILE";
+pub const TOOL_TRIGGER_WRITE_FILE: &str = "WRITE_FILE";
+pub const TOOL_TRIGGER_RUN_CAT: &str = "RUN cat";
+pub const TOOL_TRIGGER_RUN_MKDIR: &str = "RUN mkdir";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BoxUploadMeta {
+    upload_id: String,
+    path: String,
+    filename: String,
+    bytes: u64,
+    created_at: i64,
+    state: String,
+    agent_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct BoxUploadRecord {
+    path: String,
+    filename: String,
+    agent_id: String,
+    bytes: u64,
+    created_at: i64,
+    state: String,
+}
 
 #[derive(Default)]
 struct Inner {
@@ -48,6 +81,7 @@ struct Inner {
     history: HashMap<String, Vec<(String, String)>>, // (role, text)
     next_entry_seq: HashMap<String, u64>,
     next_agent_n: u64,
+    uploads: HashMap<String, BoxUploadRecord>,
 }
 
 struct PendingTurn {
@@ -58,12 +92,17 @@ struct Shared {
     inner: RwLock<Inner>,
     invokes: AtomicU64,
     pending: RwLock<HashMap<String, Arc<PendingTurn>>>,
-    turn_tx: tokio::sync::broadcast::Sender<TurnFinishedHint>,
+    turn_tx: tokio::sync::broadcast::Sender<RuntimeHint>,
     workspace_root: PathBuf,
     turn_delay: Duration,
+    vnc_stub_base: String,
+    vnc_mode: VncMode,
+    vnc_upstream: Option<String>,
+    vnc_tokens: RwLock<HashMap<String, VncTokenRecord>>,
+    attach_ttl: Duration,
 }
 
-/// Box Sidecar gateway: multi-turn + workspace tools + measurable interrupt.
+/// Box Sidecar gateway: multi-turn + workspace tools + streaming hints + VNC/attach.
 #[derive(Clone)]
 pub struct BoxSidecarGateway {
     shared: Arc<Shared>,
@@ -85,14 +124,38 @@ impl BoxSidecarGateway {
 
     pub fn new(workspace_root: PathBuf, turn_delay: Duration) -> Self {
         let _ = std::fs::create_dir_all(&workspace_root);
-        let (turn_tx, _) = tokio::sync::broadcast::channel(64);
+        let (turn_tx, _) = tokio::sync::broadcast::channel(128);
+
+        let mut vnc_mode = VncMode::Stub;
+        if let Ok(v) = std::env::var(ENV_VNC_MODE) {
+            vnc_mode = VncMode::parse(&v);
+        }
+        let mut vnc_upstream = None;
+        if let Ok(v) = std::env::var(ENV_VNC_UPSTREAM) {
+            let t = v.trim().to_string();
+            if !t.is_empty() {
+                vnc_upstream = Some(t);
+            }
+        }
+        let vnc_stub_base = std::env::var("ATLAS_VNC_STUB_BASE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_VNC_STUB_BASE.to_string())
+            .trim_end_matches('/')
+            .to_string();
+        let attach_ttl = std::env::var(ENV_ATTACH_TTL_SECS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(DEFAULT_ATTACH_TTL_SECS));
+
         let mut agents = HashMap::new();
         agents.insert(
             DEFAULT_AGENT_ID.to_string(),
             AgentRecord {
                 id: DEFAULT_AGENT_ID.to_string(),
                 name: DEFAULT_AGENT_NAME.to_string(),
-                description: "R1 box sidecar agent".to_string(),
+                description: "R2 box sidecar agent".to_string(),
                 is_running: false,
                 created_at: 1_700_000_000_000.0,
             },
@@ -115,9 +178,10 @@ impl BoxSidecarGateway {
         // Seed default agent workspace with a marker file for LIST_DIR evidence.
         let agt_dir = workspace_root.join(DEFAULT_AGENT_ID);
         let _ = std::fs::create_dir_all(&agt_dir);
+        let _ = std::fs::create_dir_all(agt_dir.join("uploads"));
         let marker = agt_dir.join(".box-sidecar");
         if !marker.exists() {
-            let _ = std::fs::write(&marker, b"r1-box-sidecar\n");
+            let _ = std::fs::write(&marker, b"r2-box-sidecar\n");
         }
 
         Self {
@@ -128,12 +192,18 @@ impl BoxSidecarGateway {
                     history,
                     next_entry_seq,
                     next_agent_n: 2,
+                    uploads: HashMap::new(),
                 }),
                 invokes: AtomicU64::new(0),
                 pending: RwLock::new(HashMap::new()),
                 turn_tx,
                 workspace_root,
                 turn_delay,
+                vnc_stub_base,
+                vnc_mode,
+                vnc_upstream,
+                vnc_tokens: RwLock::new(HashMap::new()),
+                attach_ttl,
             }),
         }
     }
@@ -142,11 +212,11 @@ impl BoxSidecarGateway {
         &self.shared.workspace_root
     }
 
-    pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<TurnFinishedHint> {
+    pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<RuntimeHint> {
         self.shared.turn_tx.subscribe()
     }
 
-    pub fn turn_sender(&self) -> tokio::sync::broadcast::Sender<TurnFinishedHint> {
+    pub fn turn_sender(&self) -> tokio::sync::broadcast::Sender<RuntimeHint> {
         self.shared.turn_tx.clone()
     }
 
@@ -159,13 +229,27 @@ impl BoxSidecarGateway {
             .unwrap_or_default()
     }
 
+    pub async fn lookup_vnc_token(&self, token: &str) -> Result<VncTokenRecord, VncTokenError> {
+        let tokens = self.shared.vnc_tokens.read().await;
+        match tokens.get(token) {
+            Some(t) if t.expires_at_ms > now_ms() => Ok(t.clone()),
+            Some(_) => Err(VncTokenError::Expired),
+            None => Err(VncTokenError::Unknown),
+        }
+    }
+
     fn agent_dir(&self, agent_id: &str) -> PathBuf {
         self.shared.workspace_root.join(agent_id)
+    }
+
+    fn uploads_dir(&self, agent_id: &str) -> PathBuf {
+        self.agent_dir(agent_id).join("uploads")
     }
 
     fn ensure_agent_workspace(&self, agent_id: &str) {
         let dir = self.agent_dir(agent_id);
         let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::create_dir_all(dir.join("uploads"));
         let marker = dir.join(".box-sidecar");
         if !marker.exists() {
             let _ = std::fs::write(&marker, format!("agent={agent_id}\n").as_bytes());
@@ -188,6 +272,25 @@ impl BoxSidecarGateway {
             "lastEntry": Value::Null,
             "lastMessageId": Value::Null,
         })
+    }
+
+    fn emit_tool_hint(&self, agent_id: &str, tool: &str, summary: &str, exit_code: Option<i32>) {
+        let _ = self.shared.turn_tx.send(RuntimeHint::Tool {
+            agent_id: agent_id.to_string(),
+            tool: tool.to_string(),
+            summary: summary.to_string(),
+            exit_code,
+        });
+    }
+
+    fn emit_delta(&self, agent_id: &str, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let _ = self.shared.turn_tx.send(RuntimeHint::AssistantDelta {
+            agent_id: agent_id.to_string(),
+            text: text.to_string(),
+        });
     }
 
     async fn list_agents(&self) -> Result<Value, GatewayError> {
@@ -305,27 +408,151 @@ impl BoxSidecarGateway {
         if prompt.contains(TOOL_TRIGGER_LIST_DIR) {
             match list_dir_safe(&cwd) {
                 Ok(listing) => {
-                    evidences.push(format!(
-                        "[tool:list_dir cwd={}]\n{listing}",
-                        cwd.display()
-                    ));
+                    let summary = format!("[tool:list_dir cwd={}]\n{listing}", cwd.display());
+                    self.emit_tool_hint(agent_id, "list_dir", &summary, Some(0));
+                    evidences.push(summary);
                 }
-                Err(e) => evidences.push(format!("[tool:list_dir error] {e}")),
+                Err(e) => {
+                    let summary = format!("[tool:list_dir error] {e}");
+                    self.emit_tool_hint(agent_id, "list_dir", &summary, Some(1));
+                    evidences.push(summary);
+                }
             }
         }
 
         if prompt.contains(TOOL_TRIGGER_RUN_LS) {
-            match run_allowlisted(&cwd, "ls") {
-                Ok(out) => evidences.push(format!("[tool:shell cmd=ls cwd={}]\n{out}", cwd.display())),
-                Err(e) => evidences.push(format!("[tool:shell cmd=ls error] {e}")),
+            match run_allowlisted(&cwd, "ls", &[]) {
+                Ok(out) => {
+                    let summary =
+                        format!("[tool:shell cmd=ls cwd={}]\n{out}", cwd.display());
+                    self.emit_tool_hint(agent_id, "shell_ls", &summary, Some(0));
+                    evidences.push(summary);
+                }
+                Err(e) => {
+                    let summary = format!("[tool:shell cmd=ls error] {e}");
+                    self.emit_tool_hint(agent_id, "shell_ls", &summary, Some(1));
+                    evidences.push(summary);
+                }
             }
         }
 
         if prompt.contains(TOOL_TRIGGER_RUN_PWD) {
-            match run_allowlisted(&cwd, "pwd") {
-                Ok(out) => evidences.push(format!("[tool:shell cmd=pwd cwd={}]\n{out}", cwd.display())),
-                Err(e) => evidences.push(format!("[tool:shell cmd=pwd error] {e}")),
+            match run_allowlisted(&cwd, "pwd", &[]) {
+                Ok(out) => {
+                    let summary =
+                        format!("[tool:shell cmd=pwd cwd={}]\n{out}", cwd.display());
+                    self.emit_tool_hint(agent_id, "shell_pwd", &summary, Some(0));
+                    evidences.push(summary);
+                }
+                Err(e) => {
+                    let summary = format!("[tool:shell cmd=pwd error] {e}");
+                    self.emit_tool_hint(agent_id, "shell_pwd", &summary, Some(1));
+                    evidences.push(summary);
+                }
             }
+        }
+
+        if let Some(rel) = parse_trigger_path(prompt, TOOL_TRIGGER_READ_FILE) {
+            match resolve_sandbox_path(&cwd, &rel) {
+                Ok(path) => match read_text_capped(&path) {
+                    Ok(body) => {
+                        let summary = format!(
+                            "[tool:read_file path={} bytes={}]\n{body}",
+                            rel,
+                            body.len()
+                        );
+                        self.emit_tool_hint(agent_id, "read_file", &summary, Some(0));
+                        evidences.push(summary);
+                    }
+                    Err(e) => {
+                        let summary = format!("[tool:read_file error] {e}");
+                        self.emit_tool_hint(agent_id, "read_file", &summary, Some(1));
+                        evidences.push(summary);
+                    }
+                },
+                Err(e) => {
+                    let summary = format!("[tool:read_file error] {e}");
+                    self.emit_tool_hint(agent_id, "read_file", &summary, Some(1));
+                    evidences.push(summary);
+                }
+            }
+        }
+
+        if let Some((rel, content)) = parse_write_file(prompt) {
+            match resolve_sandbox_path(&cwd, &rel) {
+                Ok(path) => match write_text_capped(&path, &content) {
+                    Ok(n) => {
+                        let summary =
+                            format!("[tool:write_file path={rel} bytes={n}] wrote ok");
+                        self.emit_tool_hint(agent_id, "write_file", &summary, Some(0));
+                        evidences.push(summary);
+                    }
+                    Err(e) => {
+                        let summary = format!("[tool:write_file error] {e}");
+                        self.emit_tool_hint(agent_id, "write_file", &summary, Some(1));
+                        evidences.push(summary);
+                    }
+                },
+                Err(e) => {
+                    let summary = format!("[tool:write_file error] {e}");
+                    self.emit_tool_hint(agent_id, "write_file", &summary, Some(1));
+                    evidences.push(summary);
+                }
+            }
+        }
+
+        if let Some(rel) = parse_trigger_path(prompt, TOOL_TRIGGER_RUN_CAT) {
+            match resolve_sandbox_path(&cwd, &rel) {
+                Ok(path) => match read_text_capped(&path) {
+                    Ok(body) => {
+                        let summary =
+                            format!("[tool:shell cmd=cat path={rel}]\n{body}");
+                        self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(0));
+                        evidences.push(summary);
+                    }
+                    Err(e) => {
+                        let summary = format!("[tool:shell cmd=cat error] {e}");
+                        self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(1));
+                        evidences.push(summary);
+                    }
+                },
+                Err(e) => {
+                    let summary = format!("[tool:shell cmd=cat error] {e}");
+                    self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(1));
+                    evidences.push(summary);
+                }
+            }
+        }
+
+        if let Some(rel) = parse_trigger_path(prompt, TOOL_TRIGGER_RUN_MKDIR) {
+            match resolve_sandbox_path(&cwd, &rel) {
+                Ok(path) => match std::fs::create_dir_all(&path) {
+                    Ok(()) => {
+                        let summary = format!("[tool:shell cmd=mkdir path={rel}] ok");
+                        self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(0));
+                        evidences.push(summary);
+                    }
+                    Err(e) => {
+                        let summary = format!("[tool:shell cmd=mkdir error] {e}");
+                        self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(1));
+                        evidences.push(summary);
+                    }
+                },
+                Err(e) => {
+                    let summary = format!("[tool:shell cmd=mkdir error] {e}");
+                    self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(1));
+                    evidences.push(summary);
+                }
+            }
+        }
+
+        // Reject unknown `RUN <cmd>` that is not on the whitelist (stable error).
+        for (cmd, detail) in scan_unknown_run_commands(prompt) {
+            let summary = format!(
+                "[tool:shell error] command not on whitelist: {cmd} ({detail})"
+            );
+            self.emit_tool_hint(agent_id, "shell_reject", &summary, Some(1));
+            evidences.push(summary);
         }
 
         if evidences.is_empty() {
@@ -491,9 +718,13 @@ impl BoxSidecarGateway {
             ));
         }
 
+        // Stream a small assistant delta before the finished hint (R2.2).
+        let delta_chunk: String = reply.chars().take(48).collect();
+        self.emit_delta(agent_id, &delta_chunk);
+
         let (preview, entries) = self.commit_turn(agent_id, &prompt, &reply).await?;
         self.clear_pending(agent_id).await;
-        let _ = self.shared.turn_tx.send(TurnFinishedHint {
+        let _ = self.shared.turn_tx.send(RuntimeHint::Finished {
             agent_id: agent_id.to_string(),
             preview: preview.clone(),
             user_text: prompt.clone(),
@@ -587,6 +818,142 @@ impl BoxSidecarGateway {
         }))
     }
 
+    async fn mint_vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        let mut tokens = self.shared.vnc_tokens.write().await;
+        mint_vnc_descriptor_value(
+            agent_id,
+            &self.shared.vnc_stub_base,
+            self.shared.vnc_mode,
+            self.shared.vnc_upstream.as_deref(),
+            Some(&mut tokens),
+        )
+    }
+
+    async fn upload_attachment(
+        &self,
+        agent_id: &str,
+        args: &Value,
+    ) -> Result<Value, GatewayError> {
+        self.sweep_expired_uploads().await;
+        self.ensure_agent_workspace(agent_id);
+        let args_json = serde_json::to_vec(args).unwrap_or_default();
+        if args_json.len() > UPLOAD_ARGS_JSON_MAX_BYTES {
+            return Err(GatewayError::rejected(
+                xai_tool_protocol::COMMAND_REJECTED_ARGS_TOO_LARGE,
+            ));
+        }
+        let filename = args
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing filename".into()))?
+            .to_string();
+        let safe_name = filename
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let b64 = args
+            .get("bytesBase64")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing bytesBase64".into()))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| GatewayError::InvalidArgs(format!("invalid bytesBase64: {e}")))?;
+        if bytes.len() > ATTACHMENT_OBJECT_MAX_BYTES {
+            return Err(GatewayError::rejected(
+                xai_tool_protocol::COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+            ));
+        }
+        let upload_id = format!("upl_{}", Uuid::new_v4().simple());
+        let created_at = now_ms();
+        let root = self.uploads_dir(agent_id);
+        let dir = root.join(&upload_id);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| GatewayError::Upstream(format!("mkdir: {e}")))?;
+        let file_path = dir.join(&safe_name);
+        std::fs::write(&file_path, &bytes)
+            .map_err(|e| GatewayError::Upstream(format!("write: {e}")))?;
+        let path = file_path.to_string_lossy().to_string();
+        let rec = BoxUploadRecord {
+            path: path.clone(),
+            filename: safe_name,
+            agent_id: agent_id.to_string(),
+            bytes: bytes.len() as u64,
+            created_at,
+            state: "ready".to_string(),
+        };
+        let meta = BoxUploadMeta {
+            upload_id: upload_id.clone(),
+            path: path.clone(),
+            filename: rec.filename.clone(),
+            bytes: rec.bytes,
+            created_at,
+            state: rec.state.clone(),
+            agent_id: agent_id.to_string(),
+        };
+        let meta_path = dir.join("meta.json");
+        let meta_s =
+            serde_json::to_string_pretty(&meta).map_err(|e| GatewayError::Upstream(e.to_string()))?;
+        std::fs::write(meta_path, meta_s)
+            .map_err(|e| GatewayError::Upstream(format!("meta: {e}")))?;
+        {
+            let mut guard = self.shared.inner.write().await;
+            guard.uploads.insert(upload_id.clone(), rec);
+        }
+        Ok(json!({
+            "path": path,
+            "uploadId": upload_id,
+        }))
+    }
+
+    async fn attach_upload(&self, agent_id: &str, args: &Value) -> Result<Value, GatewayError> {
+        self.sweep_expired_uploads().await;
+        let upload_id = args
+            .get("uploadId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing uploadId".into()))?;
+        let guard = self.shared.inner.read().await;
+        match guard.uploads.get(upload_id) {
+            Some(rec) if !is_expired(rec.created_at, self.shared.attach_ttl) => Ok(json!({
+                "path": rec.path,
+                "filename": rec.filename,
+                "agentId": rec.agent_id,
+            })),
+            Some(_) | None => {
+                let _ = agent_id;
+                Err(GatewayError::rejected(
+                    xai_tool_protocol::COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+                ))
+            }
+        }
+    }
+
+    async fn sweep_expired_uploads(&self) {
+        let ttl = self.shared.attach_ttl;
+        let mut guard = self.shared.inner.write().await;
+        let expired: Vec<(String, String)> = guard
+            .uploads
+            .iter()
+            .filter(|(_, r)| is_expired(r.created_at, ttl))
+            .map(|(k, r)| (k.clone(), r.path.clone()))
+            .collect();
+        for (id, path) in expired {
+            guard.uploads.remove(&id);
+            if let Some(parent) = Path::new(&path).parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
+    }
+
     async fn dispatch(&self, agent_id: &str, name: &str, args: Value) -> Result<Value, GatewayError> {
         match name {
             "listAgents" => self.list_agents().await,
@@ -594,6 +961,8 @@ impl BoxSidecarGateway {
             "sendPrompt" => self.send_prompt(agent_id, &args).await,
             "interruptAgentRun" => self.interrupt_agent_run(agent_id, &args).await,
             "getAgentTranscriptTail" => self.get_transcript_tail(agent_id, &args).await,
+            "uploadAttachment" => self.upload_attachment(agent_id, &args).await,
+            "attachUpload" => self.attach_upload(agent_id, &args).await,
             other => Err(GatewayError::UnknownMethod(other.to_string())),
         }
     }
@@ -610,6 +979,12 @@ impl Gateway for BoxSidecarGateway {
     fn invoke_count(&self) -> u64 {
         self.shared.invokes.load(Ordering::SeqCst)
     }
+
+    async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        self.shared.invokes.fetch_add(1, Ordering::SeqCst);
+        info!(%agent_id, "box sidecar vnc_descriptor");
+        self.mint_vnc_descriptor(agent_id).await
+    }
 }
 
 #[async_trait]
@@ -620,6 +995,10 @@ impl Gateway for Arc<BoxSidecarGateway> {
 
     fn invoke_count(&self) -> u64 {
         (**self).invoke_count()
+    }
+
+    async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
+        (**self).vnc_descriptor(agent_id).await
     }
 }
 
@@ -645,12 +1024,13 @@ fn list_dir_safe(dir: &Path) -> Result<String, String> {
 }
 
 /// Allowlisted shell only: `ls` or `pwd` (no args, fixed cwd).
-fn run_allowlisted(cwd: &Path, cmd: &str) -> Result<String, String> {
+fn run_allowlisted(cwd: &Path, cmd: &str, args: &[&str]) -> Result<String, String> {
     match cmd {
         "ls" | "pwd" => {}
         other => return Err(format!("command not on whitelist: {other}")),
     }
     let output = StdCommand::new(cmd)
+        .args(args)
         .current_dir(cwd)
         .output()
         .map_err(|e| e.to_string())?;
@@ -662,6 +1042,141 @@ fn run_allowlisted(cwd: &Path, cmd: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Resolve `<rel>` under agent cwd; reject `..` / absolute escapes.
+fn resolve_sandbox_path(agent_cwd: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Err("empty relative path".into());
+    }
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        return Err(format!("absolute path rejected: {rel}"));
+    }
+    for c in p.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(format!("path escape rejected (..): {rel}"));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("absolute path rejected: {rel}"));
+            }
+        }
+    }
+    let joined = agent_cwd.join(p);
+    let cwd_canon = std::fs::canonicalize(agent_cwd).unwrap_or_else(|_| agent_cwd.to_path_buf());
+    // Parent may not exist yet (WRITE/mkdir); canonicalize existing prefix.
+    let candidate = if joined.exists() {
+        std::fs::canonicalize(&joined).unwrap_or(joined.clone())
+    } else if let Some(parent) = joined.parent() {
+        let parent_canon = if parent.exists() {
+            std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf())
+        } else {
+            // Ensure parents within sandbox for mkdir/write of nested rel.
+            parent.to_path_buf()
+        };
+        parent_canon.join(joined.file_name().unwrap_or_default())
+    } else {
+        joined.clone()
+    };
+    if !candidate.starts_with(&cwd_canon) && !joined.starts_with(agent_cwd) {
+        return Err(format!("path escapes workspace: {rel}"));
+    }
+    // Extra string check against raw `..` already done; return joined (not necessarily canon).
+    Ok(agent_cwd.join(p))
+}
+
+fn read_text_capped(path: &Path) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() as usize > BOX_TEXT_FILE_MAX_BYTES {
+        return Err(format!(
+            "text exceeds {BOX_TEXT_FILE_MAX_BYTES} byte cap (got {} bytes)",
+            meta.len()
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() > BOX_TEXT_FILE_MAX_BYTES {
+        return Err(format!(
+            "text exceeds {BOX_TEXT_FILE_MAX_BYTES} byte cap (got {} bytes)",
+            bytes.len()
+        ));
+    }
+    String::from_utf8(bytes).map_err(|e| format!("not utf-8 text: {e}"))
+}
+
+fn write_text_capped(path: &Path, content: &str) -> Result<usize, String> {
+    if content.len() > BOX_TEXT_FILE_MAX_BYTES {
+        return Err(format!(
+            "text exceeds {BOX_TEXT_FILE_MAX_BYTES} byte cap (got {} bytes)",
+            content.len()
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(content.len())
+}
+
+fn first_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    let end = s
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(s.len());
+    let tok = &s[..end];
+    let rest = s[end..].trim_start();
+    Some((tok, rest))
+}
+
+fn parse_trigger_path(prompt: &str, trigger: &str) -> Option<String> {
+    let idx = prompt.find(trigger)?;
+    let rest = &prompt[idx + trigger.len()..];
+    let (tok, _) = first_token(rest)?;
+    if tok.is_empty() {
+        return None;
+    }
+    Some(tok.to_string())
+}
+
+fn parse_write_file(prompt: &str) -> Option<(String, String)> {
+    let idx = prompt.find(TOOL_TRIGGER_WRITE_FILE)?;
+    let rest = &prompt[idx + TOOL_TRIGGER_WRITE_FILE.len()..];
+    let (path, after) = first_token(rest)?;
+    let content = if let Some(i) = after.find("<<<") {
+        after[i + 3..].trim().to_string()
+    } else {
+        after.trim().to_string()
+    };
+    Some((path.to_string(), content))
+}
+
+/// Detect `RUN <cmd>` forms that are not on the allowlist.
+fn scan_unknown_run_commands(prompt: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut search = prompt;
+    while let Some(idx) = search.find("RUN ") {
+        let after = &search[idx + 4..];
+        let cmd_line = after.split('\n').next().unwrap_or(after).trim();
+        let cmd = cmd_line.split_whitespace().next().unwrap_or("");
+        if cmd.is_empty() {
+            search = &search[idx + 4..];
+            continue;
+        }
+        let allowed = matches!(cmd, "ls" | "pwd" | "cat" | "mkdir");
+        if !allowed {
+            out.push((
+                cmd.to_string(),
+                "closed-set reject; not silent".to_string(),
+            ));
+        }
+        search = &search[idx + 4..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -723,6 +1238,71 @@ mod tests {
         let p = r["preview"].as_str().unwrap();
         assert!(p.contains("[tool:list_dir"), "{p}");
         assert!(p.contains(".box-sidecar"), "{p}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn read_write_and_path_escape() {
+        let root = std::env::temp_dir().join(format!(
+            "atlas-box-rw-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let gw = BoxSidecarGateway::new(root.clone(), Duration::from_millis(5));
+        let w = gw
+            .invoke(
+                "agt_1",
+                "sendPrompt",
+                json!({ "prompt": "WRITE_FILE notes.txt <<< hello-r2" }),
+            )
+            .await
+            .unwrap();
+        let pw = w["preview"].as_str().unwrap();
+        assert!(pw.contains("[tool:write_file"), "{pw}");
+        let r = gw
+            .invoke(
+                "agt_1",
+                "sendPrompt",
+                json!({ "prompt": "READ_FILE notes.txt" }),
+            )
+            .await
+            .unwrap();
+        let pr = r["preview"].as_str().unwrap();
+        assert!(pr.contains("hello-r2"), "{pr}");
+        let bad = gw
+            .invoke(
+                "agt_1",
+                "sendPrompt",
+                json!({ "prompt": "READ_FILE ../etc/passwd" }),
+            )
+            .await
+            .unwrap();
+        let pb = bad["preview"].as_str().unwrap();
+        assert!(
+            pb.contains("path escape") || pb.contains(".."),
+            "expected escape reject: {pb}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn unknown_shell_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "atlas-box-sh-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let gw = BoxSidecarGateway::new(root.clone(), Duration::from_millis(5));
+        let r = gw
+            .invoke(
+                "agt_1",
+                "sendPrompt",
+                json!({ "prompt": "please RUN curl http://evil" }),
+            )
+            .await
+            .unwrap();
+        let p = r["preview"].as_str().unwrap();
+        assert!(p.contains("command not on whitelist: curl"), "{p}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
