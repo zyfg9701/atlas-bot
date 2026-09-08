@@ -5,4 +5,5 @@ members = [
   "third_party/xai-tool-protocol",
   "crates/atlas-bot-hub",
   "crates/atlas-bot-gateway",
+  "crates/atlas-bot-cli",
 ]
