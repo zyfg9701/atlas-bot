@@ -14,7 +14,7 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::info;
 
 use crate::{
-    AgentRecord, Gateway, GatewayError, TranscriptEntry, TurnFinishedHint, DEFAULT_AGENT_ID,
+    AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
     DEFAULT_AGENT_NAME,
 };
 
@@ -38,7 +38,7 @@ struct Shared {
     inner: RwLock<Inner>,
     invokes: AtomicU64,
     pending: RwLock<HashMap<String, Arc<PendingTurn>>>,
-    turn_tx: tokio::sync::broadcast::Sender<TurnFinishedHint>,
+    turn_tx: tokio::sync::broadcast::Sender<RuntimeHint>,
     base: String,
     api_key: String,
     model: String,
@@ -108,7 +108,7 @@ impl OpenAiCompatGateway {
         }
     }
 
-    pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<TurnFinishedHint> {
+    pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<RuntimeHint> {
         self.shared.turn_tx.subscribe()
     }
 
@@ -343,7 +343,7 @@ impl OpenAiCompatGateway {
         match result {
             Ok(reply) => {
                 let (preview, entries) = self.commit_turn(agent_id, &prompt, &reply).await?;
-                let _ = self.shared.turn_tx.send(TurnFinishedHint {
+                let _ = self.shared.turn_tx.send(RuntimeHint::Finished {
                     agent_id: agent_id.to_string(),
                     preview: preview.clone(),
                     user_text: prompt,

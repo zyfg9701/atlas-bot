@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use atlas_bot_gateway::{
-    Gateway, GatewayError, InMemoryGateway, TranscriptEntry, DEFAULT_AGENT_ID, DEFAULT_AGENT_NAME,
+    Gateway, GatewayError, InMemoryGateway, RuntimeHint, TranscriptEntry, CHANNEL_HUB_ASSISTANT_DELTA,
+    CHANNEL_HUB_TOOL, DEFAULT_AGENT_ID, DEFAULT_AGENT_NAME,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, RwLock};
@@ -30,7 +31,7 @@ use xai_tool_protocol::{
     BotSubscribeParams, BotTranscriptOffboxParams, BotTranscriptOffboxResult,
     BotVncDescriptorParams, BotVncDescriptorResult, ConnectionId, ConnectionKind, HelloAckMsg,
     HelloMsg, HubChannel, HubTurnFinishedEvent, JsonRpcError, JsonRpcId, JsonRpcNotification,
-    JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, Method, ResponseOutcome,
+    JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, Method,
     BOT_RELAY_CAPABILITIES, COMMAND_REJECTED_AGENT_ID_MISMATCH, COMMAND_REJECTED_ARGS_INVALID,
     COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD, COMMAND_REJECTED_NOT_YET_ENABLED, PROTOCOL_VERSION,
 };
@@ -66,7 +67,7 @@ pub struct Hub {
     event_bus: broadcast::Sender<(String /*conn*/, String /*json*/)>,
     cold_hits: AtomicU64,
     hot_hits: AtomicU64,
-    /// When true, `TurnFinishedHint` bridge owns `hub:turn_finished`.
+    /// When true, `RuntimeHint` bridge owns streaming events + `hub:turn_finished`.
     /// When false (typical HTTP remote), Hub emits after sync-complete sendPrompt.
     turn_bridge_active: AtomicBool,
 }
@@ -126,19 +127,58 @@ impl Hub {
         self.event_bus.subscribe()
     }
 
-    /// Spawn a task that converts gateway turn hints into `hub:turn_finished` events.
+    /// Spawn a task that converts gateway [`RuntimeHint`]s into `bot.event`s
+    /// (`hub:tool` / `hub:assistant_delta` / `hub:turn_finished`). B2 in-process path.
     pub fn spawn_turn_bridge(
         self: &Arc<Self>,
-        mut rx: broadcast::Receiver<atlas_bot_gateway::TurnFinishedHint>,
+        mut rx: broadcast::Receiver<RuntimeHint>,
     ) {
         self.turn_bridge_active.store(true, Ordering::SeqCst);
         let hub = Arc::clone(self);
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(hint) => {
-                        hub.ingest_turn_entries(&hint.agent_id, &hint.entries).await;
-                        hub.emit_turn_finished(&hint.agent_id, &hint.preview).await;
+                    Ok(RuntimeHint::Tool {
+                        agent_id,
+                        tool,
+                        summary,
+                        exit_code,
+                    }) => {
+                        let event = json!({
+                            "agentId": agent_id,
+                            "tool": tool,
+                            "summary": summary,
+                            "exitCode": exit_code,
+                        });
+                        hub.fanout_event(
+                            &agent_id,
+                            xai_tool_protocol::BotEventChannel::from_wire(CHANNEL_HUB_TOOL),
+                            event,
+                        )
+                        .await;
+                    }
+                    Ok(RuntimeHint::AssistantDelta { agent_id, text }) => {
+                        let event = json!({
+                            "agentId": agent_id,
+                            "text": text,
+                        });
+                        hub.fanout_event(
+                            &agent_id,
+                            xai_tool_protocol::BotEventChannel::from_wire(
+                                CHANNEL_HUB_ASSISTANT_DELTA,
+                            ),
+                            event,
+                        )
+                        .await;
+                    }
+                    Ok(RuntimeHint::Finished {
+                        agent_id,
+                        preview,
+                        entries,
+                        ..
+                    }) => {
+                        hub.ingest_turn_entries(&agent_id, &entries).await;
+                        hub.emit_turn_finished(&agent_id, &preview).await;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -533,7 +573,7 @@ impl Hub {
         match name {
             "sendPrompt" => {
                 // HTTP remote / sync-complete: emit hub:turn_finished when the
-                // gateway result asks for it and no in-process TurnFinishedHint
+                // gateway result asks for it and no in-process RuntimeHint
                 // bridge is active (大禹 P3.5 nail).
                 if self.turn_bridge_active.load(Ordering::SeqCst) {
                     return;
@@ -826,6 +866,7 @@ mod cold_hot_tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
+    use xai_tool_protocol::ResponseOutcome;
 
     fn rpc(method: &str, params: Value, id: i64) -> JsonRpcRequest<Value> {
         JsonRpcRequest {
