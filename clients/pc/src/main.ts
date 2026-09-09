@@ -20,97 +20,147 @@ import {
 
 const app = document.querySelector("#app")!;
 
+const wantsDebugOpen = (() => {
+  try {
+    if (new URLSearchParams(location.search).get("debug") === "1") return true;
+    if (localStorage.getItem("atlas-pc-debug") === "1") return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+})();
+
 app.innerHTML = `
-  <h1>atlas-bot PC · P5 bot_client</h1>
-  <div id="fail" class="fail-banner"></div>
-  <div class="panel" style="margin-bottom:12px">
-    <div class="row">
-      <label>Hub WS</label>
-      <input id="url" value="${DEFAULT_HUB_WS}" />
-      <button id="btnConnect">Connect + hello</button>
-      <button id="btnDisconnect" class="secondary">Disconnect</button>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <strong>atlas-bot</strong>
+      <span class="topbar-sub">PC · Chat</span>
+    </div>
+    <div class="topbar-actions">
       <span id="state" class="badge disconnected">disconnected</span>
+      <button id="btnConnect" type="button">Connect</button>
+      <button id="btnDisconnect" class="secondary" type="button">Disconnect</button>
+      <button id="btnLogin" type="button" title="OIDC PKCE (non-dev Hub)">Login</button>
+      <button id="btnLogout" class="secondary" type="button">Logout</button>
+    </div>
+  </header>
+
+  <details class="advanced" id="advancedHub">
+    <summary>高级 · Hub URL / Bearer</summary>
+    <div class="row">
+      <label for="url">Hub WS</label>
+      <input id="url" value="${DEFAULT_HUB_WS}" />
     </div>
     <div class="row">
-      <label>Bearer</label>
+      <label for="tokenPaste">Bearer</label>
       <input id="tokenPaste" placeholder="optional paste token (dev) or after Login" />
-      <button id="btnLogin">Login (OIDC PKCE)</button>
-      <button id="btnLogout" class="secondary">Logout</button>
     </div>
     <div class="mono" id="authOut">auth: (none) · Tauri Bearer WS for production oidc/static</div>
-    <div class="mono" id="caps">capabilities: —</div>
-  </div>
-  <div class="grid">
-    <div class="panel">
-      <h2>Cold path (status / roster / transcript.offbox)</h2>
+  </details>
+
+  <div id="fail" class="fail-banner" role="alert"></div>
+
+  <main class="chat-layout">
+    <aside class="agent-pane panel">
+      <h2>Agent</h2>
       <div class="row">
-        <button id="btnStatus">bot.status</button>
-        <button id="btnRoster">bot.roster</button>
-        <button id="btnOffbox">offbox page</button>
-        <button id="btnOffboxNext" class="secondary">offbox next</button>
-      </div>
-      <div class="mono" id="statusOut">runState: —</div>
-      <ul class="agents" id="roster"></ul>
-      <h2 style="margin-top:10px">Cold / offline transcript</h2>
-      <div class="mono" id="offboxCursor">cursor: (first page)</div>
-      <div id="offbox" class="mono"></div>
-    </div>
-    <div class="panel">
-      <h2>Multi-agent + hot path</h2>
-      <div class="row">
-        <label>agent</label>
-        <select id="agentId"></select>
-        <button id="btnSub">subscribe</button>
-        <button id="btnUnsub" class="secondary">unsubscribe</button>
+        <select id="agentId" aria-label="Select agent"></select>
       </div>
       <div class="row">
         <input id="newName" placeholder="new agent name" value="Scout" />
-        <button id="btnCreate">createAgent</button>
-        <button id="btnList">listAgents</button>
+        <button id="btnCreateMain" type="button">Create</button>
       </div>
-      <div class="row">
-        <button id="btnTail">getAgentTranscriptTail</button>
-        <button id="btnInterrupt" class="secondary">interruptAgentRun</button>
+      <p class="hint mono">Connect 后自动 listAgents；发送时自动 subscribe。</p>
+    </aside>
+
+    <section class="chat-pane panel">
+      <h2>Conversation</h2>
+      <div id="conversation" class="conversation mono" aria-live="polite"></div>
+      <div class="composer">
+        <textarea id="prompt" placeholder="Write a prompt…" rows="3">hello U1</textarea>
+        <div class="composer-actions">
+          <button id="btnSend" type="button">Send</button>
+          <button id="btnInterrupt" class="secondary" type="button">Interrupt</button>
+          <label class="mono immediate-label"><input type="checkbox" id="immediate" /> immediate</label>
+          <div class="composer-tools">
+            <button id="btnAttachIcon" class="icon-btn secondary" type="button" title="Attach file (debug upload)">📎</button>
+            <button id="btnVncIcon" class="icon-btn secondary" type="button" title="Open desktop">🖥</button>
+            <input id="filePickMain" type="file" class="sr-only" />
+          </div>
+        </div>
       </div>
-      <textarea id="prompt" placeholder="prompt text">hello P3</textarea>
-      <div class="row" style="margin-top:8px">
-        <button id="btnSend">sendPrompt</button>
-        <label class="mono"><input type="checkbox" id="immediate" /> immediate (skip interrupt window)</label>
+    </section>
+  </main>
+
+  <details class="debug-accordion" id="debugPanel"${wantsDebugOpen ? " open" : ""}>
+    <summary>更多 / 调试 ▾</summary>
+    <div class="debug-body">
+      <div class="debug-grid">
+        <div class="panel debug-section">
+          <h2>Cold path</h2>
+          <div class="row">
+            <button id="btnStatus" type="button">status</button>
+            <button id="btnRoster" type="button">roster</button>
+            <button id="btnOffbox" type="button">offbox</button>
+            <button id="btnOffboxNext" class="secondary" type="button">offbox next</button>
+          </div>
+          <div class="mono" id="statusOut">runState: —</div>
+          <ul class="agents" id="roster"></ul>
+          <div class="mono" id="offboxCursor">cursor: (first page)</div>
+          <div id="offbox" class="mono scrollbox"></div>
+        </div>
+
+        <div class="panel debug-section">
+          <h2>Protocol · hot path</h2>
+          <div class="row">
+            <button id="btnSub" type="button">subscribe</button>
+            <button id="btnUnsub" class="secondary" type="button">unsubscribe</button>
+            <button id="btnTail" type="button">getTail</button>
+            <button id="btnList" type="button">listAgents</button>
+          </div>
+          <div class="row">
+            <button id="btnCreate" type="button">createAgent</button>
+            <span class="hint mono">（主栏 Create 同逻辑）</span>
+          </div>
+          <div class="mono" id="listOut"></div>
+          <div class="mono" id="caps">capabilities: —</div>
+          <div class="mono" id="connMeta">connection_id: —</div>
+        </div>
+
+        <div class="panel debug-section">
+          <h2>Desktop · attachments</h2>
+          <div class="row">
+            <button id="btnVnc" type="button">Open desktop</button>
+            <span class="mono" id="vncOut">vnc: —</span>
+          </div>
+          <div class="row">
+            <input id="filePick" type="file" />
+            <button id="btnUpload" type="button">uploadAttachment</button>
+            <button id="btnAttach" class="secondary" type="button">attachUpload (last id)</button>
+          </div>
+          <div class="mono" id="uploadOut">upload path: —</div>
+          <p class="hint mono">UI caps file pick at 1.5 MiB (args JSON hard limit 3 MiB → reason args_too_large).</p>
+        </div>
       </div>
-      <div class="mono" id="listOut" style="margin-top:8px"></div>
+
+      <div class="panel debug-section" style="margin-top:12px">
+        <h2>Raw panes (transcript / events) · Log</h2>
+        <div class="debug-split">
+          <div>
+            <h3 class="subh">Events</h3>
+            <div id="events" class="mono scrollbox"></div>
+          </div>
+          <div>
+            <h3 class="subh">Hot transcript tail</h3>
+            <div id="transcript" class="mono scrollbox"></div>
+          </div>
+        </div>
+        <h3 class="subh">Log</h3>
+        <div id="log" class="mono scrollbox logbox"></div>
+        <p class="hint mono">Tip: <code>?debug=1</code> or localStorage <code>atlas-pc-debug=1</code> opens this panel on load.</p>
+      </div>
     </div>
-  </div>
-  <div class="grid" style="margin-top:12px">
-    <div class="panel">
-      <h2>Events (seq sort/display only; per-agent)</h2>
-      <div id="events" class="mono"></div>
-    </div>
-    <div class="panel">
-      <h2>Hot transcript tail (current agent)</h2>
-      <div id="transcript" class="mono"></div>
-    </div>
-  </div>
-  <div class="panel" style="margin-top:12px">
-    <h2>P5 · Desktop (bot.vncDescriptor) + attachments</h2>
-    <div class="row">
-      <button id="btnVnc">Open desktop</button>
-      <span class="mono" id="vncOut">vnc: —</span>
-    </div>
-    <div class="row">
-      <input id="filePick" type="file" />
-      <button id="btnUpload">uploadAttachment</button>
-      <button id="btnAttach" class="secondary">attachUpload (last id)</button>
-    </div>
-    <div class="mono" id="uploadOut">upload path: —</div>
-    <p class="mono" style="color:var(--muted);margin:6px 0 0">
-      UI caps file pick at 1.5 MiB (args JSON hard limit 3 MiB → reason args_too_large).
-      Closed-set reasons show in the Failure banner.
-    </p>
-  </div>
-  <div class="panel" style="margin-top:12px">
-    <h2>Log</h2>
-    <div id="log" class="mono"></div>
-  </div>
+  </details>
 `;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -118,6 +168,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const urlEl = $<HTMLInputElement>("url");
 const stateEl = $("state");
 const capsEl = $("caps");
+const connMetaEl = $("connMeta");
 const statusOut = $("statusOut");
 const rosterEl = $("roster");
 const agentEl = $<HTMLSelectElement>("agentId");
@@ -127,6 +178,7 @@ const immediateEl = $<HTMLInputElement>("immediate");
 const logEl = $("log");
 const eventsEl = $("events");
 const transcriptEl = $("transcript");
+const conversationEl = $("conversation");
 const offboxEl = $("offbox");
 const offboxCursorEl = $("offboxCursor");
 const listOut = $("listOut");
@@ -134,8 +186,10 @@ const failEl = $("fail");
 const vncOut = $("vncOut");
 const uploadOut = $("uploadOut");
 const filePick = $<HTMLInputElement>("filePick");
+const filePickMain = $<HTMLInputElement>("filePickMain");
 const tokenPaste = $<HTMLInputElement>("tokenPaste");
 const authOut = $("authOut");
+const debugPanel = $<HTMLDetailsElement>("debugPanel");
 
 let sessionToken: string | undefined;
 
@@ -145,9 +199,18 @@ let knownAgents: { id: string; name: string }[] = [{ id: "agt_1", name: "Watcher
 let offboxNextCursor: string | null | undefined = undefined;
 let lastRoster: RosterEntry[] = [];
 let lastUploadId: string | null = null;
+let lastTailRaw: unknown = null;
 
 /** PC-side soft cap — far below gateway 3 MiB args JSON limit. */
 const UI_UPLOAD_MAX_BYTES = Math.floor(1.5 * 1024 * 1024);
+
+debugPanel.addEventListener("toggle", () => {
+  try {
+    localStorage.setItem("atlas-pc-debug", debugPanel.open ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+});
 
 function showFail(err: DisplayError) {
   const bits = [
@@ -228,12 +291,53 @@ function mergeKnownFromList(list: unknown) {
   renderAgentSelect();
 }
 
+function formatEventLine(e: BotEventEnvelope): string {
+  const body =
+    typeof e.event === "object" && e.event !== null
+      ? JSON.stringify(e.event)
+      : String(e.event ?? "");
+  return `▸ #${e.seq} ${e.channel} ${body}`;
+}
+
+function renderConversation() {
+  const aid = currentAgentId();
+  const parts: string[] = [];
+
+  if (lastTailRaw != null) {
+    parts.push("—— transcript ——");
+    try {
+      parts.push(
+        typeof lastTailRaw === "string"
+          ? lastTailRaw
+          : JSON.stringify(lastTailRaw, null, 2),
+      );
+    } catch {
+      parts.push(String(lastTailRaw));
+    }
+  }
+
+  const sorted = sortEventsBySeq(events.filter((e) => e.agentId === aid));
+  if (sorted.length) {
+    parts.push("—— live events ——");
+    for (const e of sorted) parts.push(formatEventLine(e));
+  }
+
+  if (!parts.length) {
+    conversationEl.textContent =
+      "Connect → pick agent → Send. Live events and transcript appear here.";
+    return;
+  }
+  conversationEl.textContent = parts.join("\n");
+  conversationEl.scrollTop = conversationEl.scrollHeight;
+}
+
 function renderEvents() {
   const aid = currentAgentId();
   const sorted = sortEventsBySeq(events.filter((e) => e.agentId === aid));
   eventsEl.textContent = sorted
     .map((e) => `#${e.seq} ${e.agentId} ${e.channel} ${JSON.stringify(e.event)}`)
     .join("\n");
+  renderConversation();
 }
 
 function renderRoster(agents: RosterEntry[]) {
@@ -267,6 +371,7 @@ function ensureClient(): HubClient {
       onHelloAck: (ack: HelloAck) => {
         capsEl.textContent =
           "capabilities: " + (ack.capabilities?.join(", ") || "(none)");
+        connMetaEl.textContent = `connection_id: ${ack.connection_id} · user_id=${ack.user_id}`;
       },
       onEvent: (ev) => {
         events.push(ev);
@@ -299,7 +404,9 @@ async function refreshTail() {
   if (!c || c.connectionState !== "ready") return;
   try {
     const r = await c.getAgentTranscriptTail(currentAgentId(), 20);
+    lastTailRaw = r;
     transcriptEl.textContent = JSON.stringify(r, null, 2);
+    renderConversation();
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -319,12 +426,83 @@ async function loadOffbox(cursor?: string | null) {
   }
 }
 
+async function ensureSubscribed(agentId: string) {
+  const c = ensureClient();
+  if (c.subscribedAgents.includes(agentId)) return;
+  await c.subscribe([agentId]);
+  appendLog("info", `auto-subscribe ${agentId}`);
+}
+
+async function doListAgents() {
+  const c = ensureClient();
+  const r = await c.listAgents(currentAgentId());
+  listOut.textContent = JSON.stringify(r, null, 2);
+  mergeKnownFromList(r);
+  appendLog("info", "listAgents result", r);
+  return r;
+}
+
+async function doCreateAgent() {
+  const name = newNameEl.value.trim() || "Agent";
+  const r = (await ensureClient().createAgent(currentAgentId(), name)) as {
+    agentId?: string;
+    agent?: { id?: string; name?: string };
+  };
+  appendLog("info", "createAgent result", r);
+  const id = r.agentId || r.agent?.id;
+  if (id) {
+    mergeKnownFromList([{ id, name: r.agent?.name || name }]);
+    agentEl.value = id;
+    const ro = await ensureClient().roster();
+    mergeKnownFromRoster(ro.agents || []);
+    renderRoster(ro.agents || []);
+    await ensureClient().subscribe([id]);
+  }
+}
+
+async function doVnc() {
+  const r = await ensureClient().vncDescriptor(currentAgentId());
+  const exp =
+    r.expiresHint == null
+      ? "expiresHint=null"
+      : `expiresHint=${r.expiresHint} (${new Date(r.expiresHint).toLocaleString()})`;
+  vncOut.textContent = `vncUrl=${r.vncUrl} · ${exp}`;
+  appendLog("info", "bot.vncDescriptor", r);
+  window.open(r.vncUrl, "_blank", "noopener,noreferrer");
+}
+
+async function doUpload(fileInput: HTMLInputElement) {
+  const file = fileInput.files?.[0];
+  if (!file) {
+    showFail({ message: "pick a file first", code: "upstream_error" });
+    return;
+  }
+  if (file.size > UI_UPLOAD_MAX_BYTES) {
+    showFail({
+      message: "command_rejected",
+      code: "command_rejected",
+      reason: "args_too_large",
+      retryable: false,
+    });
+    appendLog("warn", `UI rejected file ${file.size} bytes > ${UI_UPLOAD_MAX_BYTES}`);
+    return;
+  }
+  const b64 = await readFileAsBase64(file);
+  const r = await ensureClient().uploadAttachment(currentAgentId(), file.name, b64);
+  lastUploadId = r.uploadId || null;
+  uploadOut.textContent = `upload path: ${r.path}` + (lastUploadId ? ` · uploadId=${lastUploadId}` : "");
+  appendLog("info", "uploadAttachment", r);
+}
+
 renderAgentSelect();
+renderConversation();
 
 agentEl.onchange = () => {
   offboxNextCursor = undefined;
   offboxCursorEl.textContent = "cursor: (first page)";
   offboxEl.textContent = "";
+  lastTailRaw = null;
+  transcriptEl.textContent = "";
   renderRoster(lastRoster);
   renderEvents();
   void refreshTail();
@@ -333,6 +511,7 @@ agentEl.onchange = () => {
 $("btnConnect").onclick = async () => {
   clearFail();
   events.length = 0;
+  lastTailRaw = null;
   renderEvents();
   const pasted = tokenPaste.value.trim() || sessionToken;
   if (pasted) sessionToken = pasted;
@@ -370,11 +549,22 @@ $("btnConnect").onclick = async () => {
     capsEl.textContent =
       "capabilities: " + (ack.capabilities?.join(", ") || "(none)") +
       ` · user_id=${ack.user_id}`;
+    connMetaEl.textContent = `connection_id: ${ack.connection_id} · user_id=${ack.user_id}`;
     const st = await c.status();
     statusOut.textContent = `runState: ${st.runState}`;
     const ro = await c.roster();
     mergeKnownFromRoster(ro.agents || []);
     renderRoster(ro.agents || []);
+    // U1: auto listAgents + select first / keep selection
+    try {
+      await doListAgents();
+    } catch (e) {
+      appendLog("warn", "listAgents after connect failed (non-fatal)", e);
+    }
+    if (knownAgents.length && !agentEl.value) {
+      agentEl.value = knownAgents[0].id;
+    }
+    void refreshTail();
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -444,6 +634,7 @@ $("btnLogout").onclick = () => {
   client = null;
   authOut.textContent = "auth: logged out";
   capsEl.textContent = "capabilities: —";
+  connMetaEl.textContent = "connection_id: —";
   appendLog("info", "logout");
 };
 
@@ -451,6 +642,7 @@ $("btnDisconnect").onclick = () => {
   client?.disconnect();
   client = null;
   capsEl.textContent = "capabilities: —";
+  connMetaEl.textContent = "connection_id: —";
 };
 
 $("btnStatus").onclick = async () => {
@@ -510,10 +702,7 @@ $("btnUnsub").onclick = async () => {
 $("btnList").onclick = async () => {
   clearFail();
   try {
-    const r = await ensureClient().listAgents(currentAgentId());
-    listOut.textContent = JSON.stringify(r, null, 2);
-    mergeKnownFromList(r);
-    appendLog("info", "listAgents result", r);
+    await doListAgents();
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -522,21 +711,16 @@ $("btnList").onclick = async () => {
 $("btnCreate").onclick = async () => {
   clearFail();
   try {
-    const name = newNameEl.value.trim() || "Agent";
-    const r = (await ensureClient().createAgent(currentAgentId(), name)) as {
-      agentId?: string;
-      agent?: { id?: string; name?: string };
-    };
-    appendLog("info", "createAgent result", r);
-    const id = r.agentId || r.agent?.id;
-    if (id) {
-      mergeKnownFromList([{ id, name: r.agent?.name || name }]);
-      agentEl.value = id;
-      const ro = await ensureClient().roster();
-      mergeKnownFromRoster(ro.agents || []);
-      renderRoster(ro.agents || []);
-      await ensureClient().subscribe([id]);
-    }
+    await doCreateAgent();
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnCreateMain").onclick = async () => {
+  clearFail();
+  try {
+    await doCreateAgent();
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -545,10 +729,14 @@ $("btnCreate").onclick = async () => {
 $("btnSend").onclick = async () => {
   clearFail();
   try {
-    const r = await ensureClient().sendPrompt(currentAgentId(), promptEl.value, {
+    const aid = currentAgentId();
+    await ensureSubscribed(aid);
+    const text = promptEl.value;
+    const r = await ensureClient().sendPrompt(aid, text, {
       immediate: immediateEl.checked,
     });
     appendLog("info", "sendPrompt result", r);
+    void refreshTail();
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -572,14 +760,16 @@ $("btnTail").onclick = async () => {
 $("btnVnc").onclick = async () => {
   clearFail();
   try {
-    const r = await ensureClient().vncDescriptor(currentAgentId());
-    const exp =
-      r.expiresHint == null
-        ? "expiresHint=null"
-        : `expiresHint=${r.expiresHint} (${new Date(r.expiresHint).toLocaleString()})`;
-    vncOut.textContent = `vncUrl=${r.vncUrl} · ${exp}`;
-    appendLog("info", "bot.vncDescriptor", r);
-    window.open(r.vncUrl, "_blank", "noopener,noreferrer");
+    await doVnc();
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnVncIcon").onclick = async () => {
+  clearFail();
+  try {
+    await doVnc();
   } catch (e) {
     showFail(e as DisplayError);
   }
@@ -600,27 +790,27 @@ function readFileAsBase64(file: File): Promise<string> {
 
 $("btnUpload").onclick = async () => {
   clearFail();
-  const file = filePick.files?.[0];
-  if (!file) {
-    showFail({ message: "pick a file first", code: "upstream_error" });
-    return;
-  }
-  if (file.size > UI_UPLOAD_MAX_BYTES) {
-    showFail({
-      message: "command_rejected",
-      code: "command_rejected",
-      reason: "args_too_large",
-      retryable: false,
-    });
-    appendLog("warn", `UI rejected file ${file.size} bytes > ${UI_UPLOAD_MAX_BYTES}`);
-    return;
-  }
   try {
-    const b64 = await readFileAsBase64(file);
-    const r = await ensureClient().uploadAttachment(currentAgentId(), file.name, b64);
-    lastUploadId = r.uploadId || null;
-    uploadOut.textContent = `upload path: ${r.path}` + (lastUploadId ? ` · uploadId=${lastUploadId}` : "");
-    appendLog("info", "uploadAttachment", r);
+    await doUpload(filePick);
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnAttachIcon").onclick = () => {
+  filePickMain.click();
+};
+
+filePickMain.onchange = async () => {
+  clearFail();
+  try {
+    // mirror into debug file input for visibility
+    if (filePickMain.files?.length) {
+      const dt = new DataTransfer();
+      dt.items.add(filePickMain.files[0]);
+      filePick.files = dt.files;
+    }
+    await doUpload(filePickMain);
   } catch (e) {
     showFail(e as DisplayError);
   }
