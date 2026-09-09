@@ -10,3 +10,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Bot-Relay conformance
         run: cargo test -p xai-tool-protocol --test bot_relay_conformance
+
+  hub-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: P3 smoke
+        run: cargo test -p atlas-bot-hub --test p3_smoke -- --nocapture --test-threads=1
+      - name: P3.5 smoke
+        run: cargo test -p atlas-bot-hub --test p35_smoke -- --nocapture --test-threads=1
+      - name: P5 smoke
+        run: cargo test -p atlas-bot-hub --test p5_smoke -- --nocapture --test-threads=1
+      - name: P5 real smoke (disk + vnc proxy mock)
+        run: cargo test -p atlas-bot-hub --test p5r_smoke -- --nocapture --test-threads=1
+      - name: P6 smoke
+        run: cargo test -p atlas-bot-cli --test p6_smoke -- --nocapture --test-threads=1
+      - name: α ACP adapter smoke
+        run: cargo test -p atlas-acp-adapter --test alpha_smoke -- --nocapture --test-threads=1
+      - name: R1 runtime (box sidecar) smoke
+        run: cargo test -p atlas-bot-hub --test runtime_smoke -- --nocapture --test-threads=1
+      - name: R2 runtime deepen smoke
+        run: cargo test -p atlas-bot-hub --test runtime_deepen_smoke -- --nocapture --test-threads=1
+      - name: B1 event ingest smoke
+        run: cargo test -p atlas-bot-hub --test b1_smoke -- --nocapture --test-threads=1
+      - name: I1 IdP auth gate smoke
+        run: cargo test -p atlas-bot-hub --test idp_smoke -- --nocapture --test-threads=1
+      - name: I2 login smoke (mock OIDC PKCE Bearer)
+        run: cargo test -p atlas-bot-cli --test i2_smoke -- --nocapture --test-threads=1

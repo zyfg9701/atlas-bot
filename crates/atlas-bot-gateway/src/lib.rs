@@ -23,8 +23,9 @@ pub mod cli_gateway;
 pub mod openai_gateway;
 
 pub use box_sidecar::{
-    BoxSidecarGateway, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE, DEFAULT_BOX_TURN_DELAY_MS,
-    TOOL_TRIGGER_LIST_DIR, TOOL_TRIGGER_READ_FILE, TOOL_TRIGGER_WRITE_FILE,
+    BoxSidecarGateway, DEFAULT_BOX_TURN_DELAY_MS, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE,
+    ENV_HUB_EVENT_TOKEN, ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS, TOOL_TRIGGER_LIST_DIR,
+    TOOL_TRIGGER_READ_FILE, TOOL_TRIGGER_WRITE_FILE,
 };
 pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_TIMEOUT_MS};
 pub use openai_gateway::{
@@ -346,25 +347,32 @@ pub struct TurnFinishedHint {
     pub entries: Vec<TranscriptEntry>,
 }
 
-/// R2 richer in-process hint (B2): tool / assistant delta / turn finished.
+/// R2 richer hint (B2 in-process / B1 HTTP ingest): tool / assistant delta / turn finished.
 /// Hub bridges these into `bot.event` channels `hub:tool`, `hub:assistant_delta`,
-/// and `hub:turn_finished`.
-#[derive(Debug, Clone)]
+/// and `hub:turn_finished`. Serde shape is shared across the process boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuntimeHint {
     Tool {
+        #[serde(rename = "agentId")]
         agent_id: String,
         tool: String,
         summary: String,
+        #[serde(rename = "exitCode", default)]
         exit_code: Option<i32>,
     },
     AssistantDelta {
+        #[serde(rename = "agentId")]
         agent_id: String,
         text: String,
     },
     Finished {
+        #[serde(rename = "agentId")]
         agent_id: String,
         preview: String,
+        #[serde(rename = "userText", default)]
         user_text: String,
+        #[serde(default)]
         entries: Vec<TranscriptEntry>,
     },
 }

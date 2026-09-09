@@ -1,4 +1,4 @@
-//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P3.5 + I1 auth gate).
+//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P3.5 + I1 auth gate + B1 ingest).
 //!
 //! Env:
 //! - `ATLAS_HUB_BIND` — default `127.0.0.1:7700`
@@ -7,6 +7,10 @@
 //! - `ATLAS_GATEWAY_HTTP_BIND` — embedded stub HTTP bind (default
 //!   `127.0.0.1:8787` for P5 VNC stub/proxy). Set `off` to disable. For scheme B,
 //!   run `atlas-bot-gateway` separately and set `ATLAS_GATEWAY_URL`.
+//! - `ATLAS_HUB_EVENT_BIND` — B1 RuntimeHint ingest (default `127.0.0.1:7701`);
+//!   must be loopback. Set `off` to disable.
+//! - `ATLAS_HUB_EVENT_TOKEN` / `ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK` —
+//!   see docs/b1-event-ingest-runbook.md.
 //! - `ATLAS_VNC_MODE` / `ATLAS_VNC_UPSTREAM` / `ATLAS_ATTACH_MODE` /
 //!   `ATLAS_ATTACH_ROOT` — see docs/P5-real-runbook.md (read by InMemoryGateway).
 //! - `ATLAS_AUTH_MODE` / `ATLAS_AUTH_JWT_SECRET` / `ATLAS_AUTH_ALLOWLIST` /
@@ -17,7 +21,7 @@ use std::sync::Arc;
 
 use atlas_bot_gateway::{serve_http, Gateway, HttpGatewayClient, InMemoryGateway};
 use atlas_bot_hub::auth::{bearer_from_authorization, AuthConfig};
-use atlas_bot_hub::{Hub, Session};
+use atlas_bot_hub::{serve_event_ingest, EventIngestConfig, Hub, Session};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::HeaderMap;
@@ -74,6 +78,25 @@ async fn main() {
             });
             info!(%addr, "embedded gateway HTTP enabled (VNC stub and /vnc/<token>)");
         }
+    }
+
+    // B1: loopback RuntimeHint ingest alongside WS. Set ATLAS_HUB_EVENT_BIND=off to disable.
+    let event_bind_raw =
+        std::env::var("ATLAS_HUB_EVENT_BIND").unwrap_or_else(|_| "127.0.0.1:7701".into());
+    if event_bind_raw != "off" && !event_bind_raw.is_empty() {
+        match EventIngestConfig::from_env() {
+            Ok(cfg) => {
+                let hub_ingest = Arc::clone(&hub);
+                tokio::spawn(async move {
+                    if let Err(e) = serve_event_ingest(hub_ingest, cfg).await {
+                        warn!("event ingest exited: {e}");
+                    }
+                });
+            }
+            Err(e) => panic!("B1 event ingest config error: {e}"),
+        }
+    } else {
+        info!("B1 event ingest disabled (ATLAS_HUB_EVENT_BIND=off)");
     }
 
     let app = Router::new()
