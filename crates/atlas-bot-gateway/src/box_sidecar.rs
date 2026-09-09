@@ -39,6 +39,12 @@ pub const ENV_BOX_WORKSPACE: &str = "ATLAS_BOX_WORKSPACE";
 pub const ENV_BOX_TURN_DELAY_MS: &str = "ATLAS_BOX_TURN_DELAY_MS";
 /// Default turn delay when env unset.
 pub const DEFAULT_BOX_TURN_DELAY_MS: u64 = 50;
+/// B1: Hub loopback ingest URL (e.g. http://127.0.0.1:7701/internal/runtime-hint).
+pub const ENV_HUB_EVENT_URL: &str = "ATLAS_HUB_EVENT_URL";
+/// Optional shared token sent as Bearer / X-Atlas-Event-Token.
+pub const ENV_HUB_EVENT_TOKEN: &str = "ATLAS_HUB_EVENT_TOKEN";
+/// POST timeout for B1 RuntimeHint push (ms).
+pub const HUB_EVENT_POST_TIMEOUT_MS: u64 = 500;
 
 const DEFAULT_WORKSPACE: &str = "./data/box-workspace";
 
@@ -100,6 +106,10 @@ struct Shared {
     vnc_upstream: Option<String>,
     vnc_tokens: RwLock<HashMap<String, VncTokenRecord>>,
     attach_ttl: Duration,
+    /// B1: optional Hub ingest URL for cross-process RuntimeHint POST.
+    event_url: Option<String>,
+    event_token: Option<String>,
+    http: reqwest::Client,
 }
 
 /// Box Sidecar gateway: multi-turn + workspace tools + streaming hints + VNC/attach.
@@ -119,10 +129,35 @@ impl BoxSidecarGateway {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_BOX_TURN_DELAY_MS);
-        Self::new(workspace, Duration::from_millis(delay_ms))
+        let event_url = std::env::var(ENV_HUB_EVENT_URL)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let event_token = std::env::var(ENV_HUB_EVENT_TOKEN)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref url) = event_url {
+            info!(%url, "B1 hub event ingest URL enabled");
+        }
+        Self::new_with_event(
+            workspace,
+            Duration::from_millis(delay_ms),
+            event_url,
+            event_token,
+        )
     }
 
     pub fn new(workspace_root: PathBuf, turn_delay: Duration) -> Self {
+        Self::new_with_event(workspace_root, turn_delay, None, None)
+    }
+
+    pub fn new_with_event(
+        workspace_root: PathBuf,
+        turn_delay: Duration,
+        event_url: Option<String>,
+        event_token: Option<String>,
+    ) -> Self {
         let _ = std::fs::create_dir_all(&workspace_root);
         let (turn_tx, _) = tokio::sync::broadcast::channel(128);
 
@@ -204,6 +239,9 @@ impl BoxSidecarGateway {
                 vnc_upstream,
                 vnc_tokens: RwLock::new(HashMap::new()),
                 attach_ttl,
+                event_url,
+                event_token,
+                http: reqwest::Client::new(),
             }),
         }
     }
@@ -274,8 +312,41 @@ impl BoxSidecarGateway {
         })
     }
 
+    fn publish_hint(&self, hint: RuntimeHint) {
+        let _ = self.shared.turn_tx.send(hint.clone());
+        let Some(url) = self.shared.event_url.clone() else {
+            return;
+        };
+        let token = self.shared.event_token.clone();
+        let client = self.shared.http.clone();
+        tokio::spawn(async move {
+            let mut req = client
+                .post(&url)
+                .timeout(Duration::from_millis(HUB_EVENT_POST_TIMEOUT_MS))
+                .json(&hint);
+            if let Some(t) = token.as_ref() {
+                req = req
+                    .header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"))
+                    .header("X-Atlas-Event-Token", t.as_str());
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => {
+                    warn!(
+                        status = %resp.status(),
+                        %url,
+                        "B1 hub event POST non-success (ignored)"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, %url, "B1 hub event POST failed (ignored)");
+                }
+            }
+        });
+    }
+
     fn emit_tool_hint(&self, agent_id: &str, tool: &str, summary: &str, exit_code: Option<i32>) {
-        let _ = self.shared.turn_tx.send(RuntimeHint::Tool {
+        self.publish_hint(RuntimeHint::Tool {
             agent_id: agent_id.to_string(),
             tool: tool.to_string(),
             summary: summary.to_string(),
@@ -287,7 +358,7 @@ impl BoxSidecarGateway {
         if text.is_empty() {
             return;
         }
-        let _ = self.shared.turn_tx.send(RuntimeHint::AssistantDelta {
+        self.publish_hint(RuntimeHint::AssistantDelta {
             agent_id: agent_id.to_string(),
             text: text.to_string(),
         });
@@ -724,7 +795,7 @@ impl BoxSidecarGateway {
 
         let (preview, entries) = self.commit_turn(agent_id, &prompt, &reply).await?;
         self.clear_pending(agent_id).await;
-        let _ = self.shared.turn_tx.send(RuntimeHint::Finished {
+        self.publish_hint(RuntimeHint::Finished {
             agent_id: agent_id.to_string(),
             preview: preview.clone(),
             user_text: prompt.clone(),

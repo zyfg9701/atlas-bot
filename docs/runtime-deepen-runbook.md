@@ -24,11 +24,13 @@ bot_client ──WS──► Hub
 **B2 (default / smoke):** in-process `RuntimeHint` broadcast bridged by
 `Hub::spawn_turn_bridge`. Deepen smoke uses Hub+Box in-process.
 
-**B1 (optional / HTTP-separated):** when Hub uses `ATLAS_GATEWAY_URL` against a
-standalone `atlas-bot-gateway` (`backend=box`), mid-turn tool/delta events are
-**not** bridged unless an out-of-band ingest is added later. Sync
-`sendPrompt` result + `hubEmitTurnFinished` still work. Documented limitation:
-deepen streaming smoke requires the in-process Hub+Box path (B2).
+**B1 (HTTP-separated):** when Hub uses `ATLAS_GATEWAY_URL` against a standalone
+`atlas-bot-gateway` (`backend=box`), set gateway `ATLAS_HUB_EVENT_URL` to Hub
+loopback ingest (`POST /internal/runtime-hint`, default bind `127.0.0.1:7701`)
+so mid-turn `hub:tool` / `hub:assistant_delta` reach subscribers. See
+`docs/b1-event-ingest-runbook.md`. Without `ATLAS_HUB_EVENT_URL`, sync
+`sendPrompt` + `hubEmitTurnFinished` still work (no mid-turn). Deepen smoke
+(`runtime_deepen_smoke`) remains the in-process **B2** path; B1 has `b1_smoke`.
 
 ## Env
 
@@ -41,7 +43,8 @@ deepen streaming smoke requires the in-process Hub+Box path (B2).
 | `ATLAS_VNC_UPSTREAM` | Optional `host:port`; absent → stub page (never fake desktop) |
 | `ATLAS_VNC_STUB_BASE` | Public base for minted URLs (default `http://127.0.0.1:8787`) |
 | `ATLAS_ATTACH_TTL_SECS` | Attachment TTL (default 24h); Box stores under workspace |
-| `ATLAS_GATEWAY_URL` | Hub → remote gateway (no B2 hints across process) |
+| `ATLAS_GATEWAY_URL` | Hub → remote gateway (pair with B1 `ATLAS_HUB_EVENT_URL` for mid-turn) |
+| `ATLAS_HUB_EVENT_URL` | Gateway → Hub ingest (B1); see b1-event-ingest-runbook |
 | `ATLAS_AUTH_MODE` | Unchanged (Hub-only IdP) |
 
 ## Tool whitelist (Box)
@@ -109,6 +112,9 @@ cargo test -p atlas-bot-hub --test runtime_deepen_smoke -- --nocapture --test-th
 #   SMOKE_OK runtime-deepen tools…
 #   SMOKE_OK runtime-deepen events…
 #   SMOKE_OK runtime-deepen box-vnc-attach…
+
+# B1 split-process mid-turn (see docs/b1-event-ingest-runbook.md):
+cargo test -p atlas-bot-hub --test b1_smoke -- --nocapture --test-threads=1
 ```
 
 Also keep green: `runtime_smoke`, `p35_smoke`, `p5_smoke`, `p5r_smoke`,
@@ -119,8 +125,8 @@ Also keep green: `runtime_smoke`, `p35_smoke`, `p5_smoke`, `p5r_smoke`,
 1. **Tool table:** LIST_DIR, READ_FILE, WRITE_FILE, RUN ls/pwd/cat/mkdir.
    Not done: arbitrary shell, curl, package managers, MCP, LSP, browser automation.
 2. **Event channels:** `hub:tool`, `hub:assistant_delta`, `hub:turn_finished`.
-   Bridging is **B2 in-process**. HTTP-separated Hub+Gateway does not stream
-   mid-turn events without a future B1 ingest; deepen smoke uses B2.
+   Bridging: **B2 in-process** (`spawn_turn_bridge`) or **B1** loopback ingest
+   (`ATLAS_HUB_EVENT_URL`). Deepen smoke uses B2; split-process smoke is `b1_smoke`.
 3. **Attachment TTL:** Aligns with P5 default TTL (`ATLAS_ATTACH_TTL_SECS`, 24h)
    with files rooted under the agent workspace (`…/uploads/`).
 4. **Model:** Deterministic local responder (history + tool evidence). Not an LLM;

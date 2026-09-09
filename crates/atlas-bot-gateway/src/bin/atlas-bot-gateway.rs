@@ -12,6 +12,8 @@
 //! - `ATLAS_AGENT_CLI_EXTRA_ARGS` — JSON string array
 //! - `ATLAS_OPENAI_*` — when backend=`openai`
 //! - `ATLAS_BOX_WORKSPACE` / `ATLAS_BOX_TURN_DELAY_MS` — when backend=`box`
+//! - `ATLAS_HUB_EVENT_URL` / `ATLAS_HUB_EVENT_TOKEN` — B1 mid-turn RuntimeHint POST
+//!   to Hub loopback ingest (see docs/b1-event-ingest-runbook.md)
 
 use std::net::SocketAddr;
 use std::sync::Arc;

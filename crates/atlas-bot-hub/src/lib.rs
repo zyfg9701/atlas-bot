@@ -10,10 +10,17 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod event_ingest;
+
+pub use event_ingest::{
+    serve_event_ingest, EventIngestConfig, DEFAULT_EVENT_BIND, ENV_ALLOW_INSECURE, ENV_EVENT_BIND,
+    ENV_EVENT_TOKEN, EVENT_BODY_MAX_BYTES,
+};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use atlas_bot_gateway::{
     Gateway, GatewayError, InMemoryGateway, RuntimeHint, TranscriptEntry, CHANNEL_HUB_ASSISTANT_DELTA,
@@ -70,6 +77,8 @@ pub struct Hub {
     /// When true, `RuntimeHint` bridge owns streaming events + `hub:turn_finished`.
     /// When false (typical HTTP remote), Hub emits after sync-complete sendPrompt.
     turn_bridge_active: AtomicBool,
+    /// Recent `hub:turn_finished` fingerprints to suppress B1+hubEmit doubles.
+    finished_dedupe: RwLock<HashMap<String, (String, Instant)>>,
 }
 
 impl Hub {
@@ -102,6 +111,7 @@ impl Hub {
             cold_hits: AtomicU64::new(0),
             hot_hits: AtomicU64::new(0),
             turn_bridge_active: AtomicBool::new(false),
+            finished_dedupe: RwLock::new(HashMap::new()),
         })
     }
 
@@ -138,53 +148,58 @@ impl Hub {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(RuntimeHint::Tool {
-                        agent_id,
-                        tool,
-                        summary,
-                        exit_code,
-                    }) => {
-                        let event = json!({
-                            "agentId": agent_id,
-                            "tool": tool,
-                            "summary": summary,
-                            "exitCode": exit_code,
-                        });
-                        hub.fanout_event(
-                            &agent_id,
-                            xai_tool_protocol::BotEventChannel::from_wire(CHANNEL_HUB_TOOL),
-                            event,
-                        )
-                        .await;
-                    }
-                    Ok(RuntimeHint::AssistantDelta { agent_id, text }) => {
-                        let event = json!({
-                            "agentId": agent_id,
-                            "text": text,
-                        });
-                        hub.fanout_event(
-                            &agent_id,
-                            xai_tool_protocol::BotEventChannel::from_wire(
-                                CHANNEL_HUB_ASSISTANT_DELTA,
-                            ),
-                            event,
-                        )
-                        .await;
-                    }
-                    Ok(RuntimeHint::Finished {
-                        agent_id,
-                        preview,
-                        entries,
-                        ..
-                    }) => {
-                        hub.ingest_turn_entries(&agent_id, &entries).await;
-                        hub.emit_turn_finished(&agent_id, &preview).await;
-                    }
+                    Ok(hint) => hub.apply_runtime_hint(hint).await,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
+    }
+
+    /// Shared fan-out for B2 (`spawn_turn_bridge`) and B1 (loopback ingest).
+    pub async fn apply_runtime_hint(&self, hint: RuntimeHint) {
+        match hint {
+            RuntimeHint::Tool {
+                agent_id,
+                tool,
+                summary,
+                exit_code,
+            } => {
+                let event = json!({
+                    "agentId": agent_id,
+                    "tool": tool,
+                    "summary": summary,
+                    "exitCode": exit_code,
+                });
+                self.fanout_event(
+                    &agent_id,
+                    xai_tool_protocol::BotEventChannel::from_wire(CHANNEL_HUB_TOOL),
+                    event,
+                )
+                .await;
+            }
+            RuntimeHint::AssistantDelta { agent_id, text } => {
+                let event = json!({
+                    "agentId": agent_id,
+                    "text": text,
+                });
+                self.fanout_event(
+                    &agent_id,
+                    xai_tool_protocol::BotEventChannel::from_wire(CHANNEL_HUB_ASSISTANT_DELTA),
+                    event,
+                )
+                .await;
+            }
+            RuntimeHint::Finished {
+                agent_id,
+                preview,
+                entries,
+                ..
+            } => {
+                self.ingest_turn_entries(&agent_id, &entries).await;
+                self.emit_turn_finished(&agent_id, &preview).await;
+            }
+        }
     }
 
     async fn ingest_turn_entries(&self, agent_id: &str, entries: &[TranscriptEntry]) {
@@ -230,6 +245,19 @@ impl Hub {
     }
 
     pub async fn emit_turn_finished(&self, agent_id: &str, preview: &str) {
+        // Dedupe B1 Finished ingest vs sync hubEmitTurnFinished (same agent+preview, ~2s).
+        {
+            let mut guard = self.finished_dedupe.write().await;
+            let now = Instant::now();
+            guard.retain(|_, (_, t)| now.duration_since(*t) < Duration::from_secs(2));
+            if let Some((prev, t)) = guard.get(agent_id) {
+                if prev == preview && now.duration_since(*t) < Duration::from_secs(2) {
+                    debug!(%agent_id, "skip duplicate hub:turn_finished");
+                    return;
+                }
+            }
+            guard.insert(agent_id.to_string(), (preview.to_string(), now));
+        }
         let body = HubTurnFinishedEvent {
             agent_id: agent_id.to_string(),
             conversation_ids: vec![],
