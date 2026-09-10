@@ -83,6 +83,19 @@ $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"
 - [ ] 无 `-Stream`：不自动设 STREAM / EVENT_URL / MOCK  
 - [ ] Send 仍可得终稿；无强制 `hub:assistant_delta`（与 CS1 text 一致）
 
+## W-L* · 真机联调指针（L1）
+
+> 真机已登录 agent 的完整步骤、失败对照、mock↔真机切换见独立页（避免与 W-E*/W-S* mock 叙事双源漂移）：  
+> **[`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md)** · 探针：`scripts/probe-agent-cli.ps1`
+
+| 位 | 勾选意图 | 入口 |
+|----|----------|------|
+| **W-L1** | 真机 text：`dev-cli-stack.ps1` → healthz `backend=cli` + `agent_cli_found=true` + `agent_cli` 非 mock → Connect/Send → 终稿 **非** `echo:` / **非** `atlas-mock-reply` | live checklist L-E4 / L-E6 / L-E7 |
+| **W-L2** | 真机 `-Stream`：横幅 STREAM + EVENT_URL、**无**自动 MOCK → ≥1× `hub:assistant_delta` → `hub:turn_finished` | live checklist L-E5 / L-E7 |
+| **W-L3** | 探测：`.\scripts\probe-agent-cli.ps1` → found + path；**不**声称已登录 | live checklist L-E3 |
+
+mock 回归仍用上方 W-E* / W-S*；真机证据可合后补。
+
 ## §7 已知限制（W1 + WS1·B）
 
 | 项 | 填实 |
