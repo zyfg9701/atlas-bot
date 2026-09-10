@@ -26,3 +26,14 @@ Generated protocol (do not fork semantics):
 
 See [docs/P4-runbook.md](../../docs/P4-runbook.md) §Evidence.
 
+
+## I2.2 Mobile ticket (M1)
+
+- Login uses **Chrome Custom Tabs + PKCE S256** (AppAuth-equivalent shape). **No WebView** primary path.
+- Redirect: `atlasbot://auth/callback` (Manifest intent-filter).
+- `client_id`: `atlas-bot-android` (register on IdP next to PC loopback).
+- TokenStore: EncryptedSharedPreferences; Logout clears.
+- `HubClient.connect` / `setAuthorization`: optional Bearer; `null` = today's no-token (`dev`) behavior.
+- Prefer `id_token` as Hub bearer (`pickHubBearer`).
+
+See [docs/i2-login-runbook.md](../../docs/i2-login-runbook.md) § Mobile (I2.2).

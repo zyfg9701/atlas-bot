@@ -165,11 +165,26 @@ class HubClient(
     @Volatile private var state: ConnState = ConnState.DISCONNECTED
     private val lastSeq = ConcurrentHashMap<String, Long>()
     private val subscribed = ConcurrentHashMap.newKeySet<String>()
+    /** Optional Hub Bearer. null = today's no-token / ATLAS_AUTH_MODE=dev behavior. */
+    @Volatile private var authorization: String? = null
 
     val connectionState: ConnState get() = state
     val subscribedAgents: Set<String> get() = subscribed.toSet()
 
     fun setUrl(url: String) { this.url = url }
+
+    fun setAuthorization(token: String?) {
+        authorization = token?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    fun getAuthorization(): String? = authorization
+
+    /** Build the WS upgrade request (unit-tested for optional Bearer header). */
+    fun buildConnectRequest(): Request {
+        val b = Request.Builder().url(url)
+        authorization?.let { b.addHeader("Authorization", "Bearer $it") }
+        return b.build()
+    }
 
     private data class Pending(
         val resolve: (Any?) -> Unit,
@@ -185,11 +200,18 @@ class HubClient(
         listener?.onLog(level, msg, data)
     }
 
-    fun connect(onReady: (HelloAck) -> Unit, onFail: (DisplayError) -> Unit) {
+    fun connect(
+        authorization: String? = null,
+        onReady: (HelloAck) -> Unit,
+        onFail: (DisplayError) -> Unit,
+    ) {
+        if (authorization != null) {
+            setAuthorization(authorization)
+        }
         disconnect()
         setState(ConnState.CONNECTING)
         var settled = false
-        val request = Request.Builder().url(url).build()
+        val request = buildConnectRequest()
         ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 setState(ConnState.HELLO)
