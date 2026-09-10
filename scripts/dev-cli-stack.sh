@@ -5,12 +5,26 @@
 # Usage:
 #   ./scripts/dev-cli-stack.sh                 # requires real `agent` on PATH
 #   ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+#   # Streaming (explicit env; Win has -Stream — see docs / windows-cli-stack-checklist):
+#   ATLAS_AGENT_CLI_STREAM=1 \
+#   ATLAS_HUB_EVENT_URL=http://127.0.0.1:7701/internal/runtime-hint \
+#   ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK=1 \
+#   MOCK_CLI_STREAM=1 \
+#   ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
 #
 # Env overrides:
 #   ATLAS_AGENT_CLI          default: agent
 #   ATLAS_GATEWAY_HTTP_BIND  default: 127.0.0.1:8787
 #   ATLAS_HUB_BIND           default: 127.0.0.1:7700
 #   ATLAS_GATEWAY_BACKEND    default: cli (forced to cli by this script unless set)
+#   ATLAS_AGENT_CLI_STREAM   CS1 opt-in (1/true/yes); unset = text
+#   ATLAS_HUB_EVENT_URL      CS1b B1 POST (e.g. http://127.0.0.1:7701/internal/runtime-hint)
+#   ATLAS_HUB_EVENT_TOKEN / ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK  B1 Hub ingest auth
+#   MOCK_CLI_STREAM / MOCK_CLI_SLEEP_MS  mock NDJSON deltas (inherited into gateway)
+#
+# This script does not default STREAM (Unix stays explicit opt-in). Win ps1 -Stream
+# fills unset STREAM/EVENT_URL/MOCK — see scripts/dev-cli-stack.ps1. Multi-process
+# mid-turn = B1 only; do NOT also open B2 spawn_turn_bridge.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -104,6 +118,16 @@ echo "    ATLAS_GATEWAY_BACKEND=$ATLAS_GATEWAY_BACKEND"
 echo "    gateway bind: $GW_BIND"
 echo "    Hub WS:       ws://${HUB_BIND}/ws"
 echo "    GATEWAY_URL:  $ATLAS_GATEWAY_URL"
+echo "    ATLAS_AGENT_CLI_STREAM=${ATLAS_AGENT_CLI_STREAM:-(unset=text)}"
+echo "    ATLAS_HUB_EVENT_URL=${ATLAS_HUB_EVENT_URL:-(unset)}"
+if [[ -n "${ATLAS_HUB_EVENT_TOKEN:-}" ]]; then
+  echo "    ATLAS_HUB_EVENT_TOKEN=(set)"
+fi
+if [[ -n "${ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK:-}" ]]; then
+  echo "    ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK=$ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK"
+fi
+echo "    MOCK_CLI_STREAM=${MOCK_CLI_STREAM:-(unset)}"
+echo "    MOCK_CLI_SLEEP_MS=${MOCK_CLI_SLEEP_MS:-(unset)}"
 echo
 
 # Ensure release/debug binaries exist (cargo run is fine)

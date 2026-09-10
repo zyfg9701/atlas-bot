@@ -5,12 +5,31 @@
 #   .\scripts\dev-cli-stack.ps1
 #   powershell -ExecutionPolicy Bypass -File .\scripts\dev-cli-stack.ps1
 #   $env:ATLAS_AGENT_CLI='.\tools\mock-cli\mock-atlas-agent-cli.cmd'; .\scripts\dev-cli-stack.ps1
+#   # WS1·B streaming one-liner (multi-process B1 mid-turn):
+#   $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1 -Stream
+#   # Or: $env:ATLAS_CLI_STACK_STREAM='1'; ...\dev-cli-stack.ps1
 #
 # Env overrides (same names as Unix):
 #   ATLAS_AGENT_CLI          default: agent
 #   ATLAS_GATEWAY_HTTP_BIND  default: 127.0.0.1:8787
 #   ATLAS_HUB_BIND           default: 127.0.0.1:7700
 #   ATLAS_GATEWAY_BACKEND    default: cli
+#   ATLAS_AGENT_CLI_STREAM   CS1 opt-in; -Stream / ATLAS_CLI_STACK_STREAM=1 sets to 1 if unset
+#   ATLAS_HUB_EVENT_URL      CS1b B1 POST URL; -Stream defaults http://127.0.0.1:7701/internal/runtime-hint if unset
+#   ATLAS_HUB_EVENT_TOKEN    B1 shared token (explicit wins; do not dual with B2)
+#   ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK  B1 loopback without token; -Stream sets 1 if token+flag both unset
+#   ATLAS_HUB_EVENT_BIND     Hub ingest listen (Hub default 127.0.0.1:7701)
+#   MOCK_CLI_STREAM          mock NDJSON deltas; -Stream + mock .cmd sets 1 if unset
+#   MOCK_CLI_SLEEP_MS        mock sleep between delta and result (cmd timeout is second-granularity)
+#   ATLAS_CLI_STACK_STREAM   1/true/yes — same as -Stream (explicit env alternative)
+#
+# Priority: explicit user env for STREAM / EVENT_URL / MOCK / TOKEN / INSECURE always wins
+# (-Stream only fills unset defaults). Without -Stream / STACK_STREAM: text stack (W1 unchanged).
+# Multi-process mid-turn = B1 only; do NOT also open B2 spawn_turn_bridge.
+
+param(
+  [switch]$Stream
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -22,6 +41,18 @@ function Get-EnvOrDefault([string]$Name, [string]$Default) {
   $v = [Environment]::GetEnvironmentVariable($Name)
   if ([string]::IsNullOrWhiteSpace($v)) { return $Default }
   return $v
+}
+
+function Test-EnvTruthy([string]$Name) {
+  $v = [Environment]::GetEnvironmentVariable($Name)
+  if ([string]::IsNullOrWhiteSpace($v)) { return $false }
+  $t = $v.Trim().ToLowerInvariant()
+  return ($t -eq '1' -or $t -eq 'true' -or $t -eq 'yes')
+}
+
+function Test-EnvSet([string]$Name) {
+  $v = [Environment]::GetEnvironmentVariable($Name)
+  return -not [string]::IsNullOrWhiteSpace($v)
 }
 
 $CLI = Get-EnvOrDefault 'ATLAS_AGENT_CLI' 'agent'
@@ -83,6 +114,9 @@ This script will NOT silently fall back to the Hub InMemory stub.
 For CI / local without a real agent, override with the mock CLI:
   `$env:ATLAS_AGENT_CLI='$mockFull'; .\scripts\dev-cli-stack.ps1
 
+Streaming (WS1·B):
+  `$env:ATLAS_AGENT_CLI='$mockFull'; .\scripts\dev-cli-stack.ps1 -Stream
+
 See docs/cli-primary-runbook.md
 "@ -ForegroundColor Red
   exit 1
@@ -93,6 +127,27 @@ $env:ATLAS_GATEWAY_BACKEND = $BACKEND
 $env:ATLAS_GATEWAY_HTTP_BIND = $GW_BIND
 $env:ATLAS_HUB_BIND = $HUB_BIND
 $env:ATLAS_GATEWAY_URL = "http://${GW_BIND}"
+
+# WS1·B: -Stream switch and/or ATLAS_CLI_STACK_STREAM=1
+$wantStream = $Stream.IsPresent -or (Test-EnvTruthy 'ATLAS_CLI_STACK_STREAM')
+if ($wantStream) {
+  if (-not (Test-EnvSet 'ATLAS_AGENT_CLI_STREAM')) {
+    $env:ATLAS_AGENT_CLI_STREAM = '1'
+  }
+  if (-not (Test-EnvSet 'ATLAS_HUB_EVENT_URL')) {
+    $env:ATLAS_HUB_EVENT_URL = 'http://127.0.0.1:7701/internal/runtime-hint'
+  }
+  # Hub B1 auth: explicit token OR insecure loopback (explicit either wins; else default insecure)
+  if (-not (Test-EnvSet 'ATLAS_HUB_EVENT_TOKEN') -and -not (Test-EnvSet 'ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK')) {
+    $env:ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK = '1'
+  }
+  $cliLeaf = [System.IO.Path]::GetFileName($CLI_RESOLVED)
+  if ($cliLeaf -ieq 'mock-atlas-agent-cli.cmd') {
+    if (-not (Test-EnvSet 'MOCK_CLI_STREAM')) {
+      $env:MOCK_CLI_STREAM = '1'
+    }
+  }
+}
 
 New-Item -ItemType Directory -Force -Path $PID_DIR | Out-Null
 New-Item -ItemType Directory -Force -Path $LOG_DIR | Out-Null
@@ -137,6 +192,26 @@ Write-Host "    ATLAS_GATEWAY_BACKEND=$env:ATLAS_GATEWAY_BACKEND"
 Write-Host "    gateway bind: $GW_BIND"
 Write-Host "    Hub WS:       ws://${HUB_BIND}/ws"
 Write-Host "    GATEWAY_URL:  $env:ATLAS_GATEWAY_URL"
+# Streaming / B1 / mock (always print — unset shown as empty)
+$streamDisp = if (Test-EnvSet 'ATLAS_AGENT_CLI_STREAM') { $env:ATLAS_AGENT_CLI_STREAM } else { '(unset=text)' }
+Write-Host "    ATLAS_AGENT_CLI_STREAM=$streamDisp"
+$eventUrlDisp = if (Test-EnvSet 'ATLAS_HUB_EVENT_URL') { $env:ATLAS_HUB_EVENT_URL } else { '(unset)' }
+Write-Host "    ATLAS_HUB_EVENT_URL=$eventUrlDisp"
+if (Test-EnvSet 'ATLAS_HUB_EVENT_TOKEN') {
+  Write-Host "    ATLAS_HUB_EVENT_TOKEN=(set)"
+}
+if (Test-EnvSet 'ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK') {
+  Write-Host "    ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK=$env:ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK"
+}
+$mockStreamDisp = if (Test-EnvSet 'MOCK_CLI_STREAM') { $env:MOCK_CLI_STREAM } else { '(unset)' }
+Write-Host "    MOCK_CLI_STREAM=$mockStreamDisp"
+$mockSleepDisp = if (Test-EnvSet 'MOCK_CLI_SLEEP_MS') { $env:MOCK_CLI_SLEEP_MS } else { '(unset)' }
+Write-Host "    MOCK_CLI_SLEEP_MS=$mockSleepDisp"
+if ($wantStream) {
+  Write-Host '    mode: Stream (-Stream / ATLAS_CLI_STACK_STREAM) — multi-process B1 only (no B2 dual)'
+} else {
+  Write-Host '    mode: text (pass -Stream or ATLAS_CLI_STACK_STREAM=1 for streaming)'
+}
 Write-Host ''
 
 function Start-CargoPackage {
@@ -268,6 +343,9 @@ try {
   Write-Host "  Invoke-WebRequest http://${GW_BIND}/healthz   # or: curl.exe -s http://${GW_BIND}/healthz"
   Write-Host "  Invoke-WebRequest http://${GW_BIND}/stats"
   Write-Host "  PC: Connect → ws://${HUB_BIND}/ws → select agent → Send"
+  if ($wantStream -or (Test-EnvSet 'ATLAS_HUB_EVENT_URL')) {
+    Write-Host '  Streaming: PC Events ≥1× hub:assistant_delta → hub:turn_finished (B1 ingest; no B2 dual)'
+  }
   Write-Host "  Logs: $GW_LOG  $HUB_LOG"
   Write-Host "  Stop: Ctrl-C (cleanup kills both) or Stop-Process -Id (Get-Content '$GW_PID_FILE'), (Get-Content '$HUB_PID_FILE')"
   Write-Host ''
