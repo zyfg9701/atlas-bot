@@ -48,12 +48,24 @@
 
 推荐：**先起 cli 栈，再 Connect**（PC 只连 Hub，不起 agent）。
 
+**Unix：**
+
 ```bash
 # 真机（PATH 上已登录的 agent）
 ./scripts/dev-cli-stack.sh
 
 # 无真 agent / CI
 ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+```
+
+**Windows：先跑 ps1，再 Connect**
+
+```powershell
+.\scripts\dev-cli-stack.ps1
+# 或 Bypass：
+powershell -ExecutionPolicy Bypass -File .\scripts\dev-cli-stack.ps1
+# mock：
+$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1
 ```
 
 详情与环境变量见 [`docs/cli-primary-runbook.md`](./cli-primary-runbook.md)。
@@ -103,7 +115,7 @@ cd clients/pc && npm i && npm run tauri dev
 | Connect 失败 | Hub 没起，或 WS 不是 `ws://127.0.0.1:7700/ws` |
 | `unauthorized` | Hub 非 `dev` 且无有效 Bearer → Login 或粘贴票 |
 | 浏览器里带鉴权连不上 | 用 **Tauri**（`connect_ws`），或 CLI `login` |
-| sendPrompt 无内容 / echo | Hub 仍在 stub（未设 `ATLAS_GATEWAY_URL`）；请走 **cli 主路径** `./scripts/dev-cli-stack.sh` |
+| sendPrompt 无内容 / echo | Hub 仍在 stub（未设 `ATLAS_GATEWAY_URL`）；请走 **cli 主路径** `./scripts/dev-cli-stack.sh` 或 `.\scripts\dev-cli-stack.ps1` |
 | 有对话无 mid-turn 事件 | 分进程未配 B1；或未订阅（Send 会自动订） |
 | 上传 `args_too_large` | 文件太大；换 &lt;1.5 MiB |
 | Open desktop 空白 | stub 正常；真桌面见 P5-real runbook |
@@ -124,9 +136,10 @@ cd clients/pc && npm i && npm run tauri dev
 
 - U1 手测：`docs/pc-ui-u1-checklist.md`  
 - **主路径：** [`docs/cli-primary-runbook.md`](./cli-primary-runbook.md)  
+- Windows 起栈：[`docs/windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
 - 阶段 runbook：`docs/P*-runbook.md`、`docs/i2-login-runbook.md`、`docs/b1-event-ingest-runbook.md`  
 - 飞天验收 / 盘古可行性：knowledge-handoff `feitian-pc-ui-convergence-acceptance.md`、`pangu-pc-ui-convergence-feasibility.md`
 
 ---
 
-**一句话：** 先 `./scripts/dev-cli-stack.sh`，再 Chat 三步（Connect → 选 agent → Send）；stub/box/openai 是旁路；Cold / VNC / upload 在「更多 / 调试」。
+**一句话：** 先起 CLI 栈（Unix `./scripts/dev-cli-stack.sh` / Win `.\scripts\dev-cli-stack.ps1`），再 Chat 三步（Connect → 选 agent → Send）；stub/box/openai 是旁路；Cold / VNC / upload 在「更多 / 调试」。
