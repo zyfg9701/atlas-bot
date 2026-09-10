@@ -50,6 +50,9 @@ import com.atlasbot.client.auth.AuthSession
 import com.atlasbot.client.auth.DEFAULT_ANDROID_CLIENT_ID
 import com.atlasbot.client.auth.MOBILE_REDIRECT_URI
 import com.atlasbot.client.auth.OidcClientConfig
+import com.atlasbot.client.auth.WeComAuth
+import com.atlasbot.client.auth.ticketProviderFromEnv
+import com.atlasbot.client.auth.wsToHttpBase
 
 private const val PREFS = "atlas_bot_mu1"
 private const val KEY_DEBUG_OPEN = "debug_open"
@@ -72,6 +75,15 @@ private fun AtlasBotScreen() {
 
     var hubUrl by remember { mutableStateOf(DEFAULT_HUB_WS) }
     var oidcIssuer by remember { mutableStateOf("http://10.0.2.2:8090") }
+    // ATLAS_TICKET_PROVIDER (default oidc); advanced field — thin Login fork only.
+    var ticketProvider by remember {
+        mutableStateOf(ticketProviderFromEnv(System.getenv("ATLAS_TICKET_PROVIDER")))
+    }
+    var wecomCorpId by remember { mutableStateOf(System.getenv("ATLAS_WECOM_CORP_ID") ?: "ww_mock_corp") }
+    var wecomAgentId by remember { mutableStateOf(System.getenv("ATLAS_WECOM_AGENT_ID") ?: "1000001") }
+    var wecomAuthorizeBase by remember {
+        mutableStateOf(System.getenv("ATLAS_WECOM_AUTHORIZE_BASE") ?: "http://10.0.2.2:8091")
+    }
     var bearerPaste by remember { mutableStateOf("") }
     var connState by remember { mutableStateOf(ConnState.DISCONNECTED) }
     var stateDetail by remember { mutableStateOf<String?>(null) }
@@ -297,25 +309,51 @@ private fun AtlasBotScreen() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {
                 lastError = null
-                val issuer = oidcIssuer.trim()
-                if (issuer.isEmpty()) {
-                    lastError = "OIDC issuer required"
-                    return@Button
-                }
-                appendLog("login → Custom Tabs PKCE ($MOBILE_REDIRECT_URI)")
-                auth.startLogin(
-                    context = context,
-                    cfg = OidcClientConfig(issuer = issuer, clientId = DEFAULT_ANDROID_CLIENT_ID),
-                ) { result ->
+                val provider = ticketProviderFromEnv(ticketProvider)
+                val onDone: (Result<String>) -> Unit = { result ->
                     onMain {
                         result.onSuccess {
-                            authStatus = "auth: ticket stored (id_token preferred)"
-                            appendLog("login ok — Connect will send Authorization: Bearer")
+                            val p = auth.currentProvider() ?: provider
+                            authStatus = "auth: ticket stored (provider=$p)"
+                            appendLog("login ok ($p) — Connect will send Authorization: Bearer")
                         }.onFailure { e ->
                             lastError = e.message
                             appendLog("login failed: ${e.message}")
                         }
                     }
+                }
+                if (provider == WeComAuth.PROVIDER) {
+                    val corp = wecomCorpId.trim()
+                    val agent = wecomAgentId.trim()
+                    val authBase = wecomAuthorizeBase.trim()
+                    if (corp.isEmpty() || agent.isEmpty() || authBase.isEmpty()) {
+                        lastError = "WeCom corpId/agentId/authorizeBase required"
+                        return@Button
+                    }
+                    val hubHttp = wsToHttpBase(hubUrl.trim())
+                    appendLog("login → Custom Tabs WeCom ($MOBILE_REDIRECT_URI) hub=$hubHttp")
+                    auth.startWeComLogin(
+                        context = context,
+                        cfg = WeComAuth.Config(
+                            corpId = corp,
+                            agentId = agent,
+                            authorizeBase = authBase,
+                            hubHttpBase = hubHttp,
+                        ),
+                        onComplete = onDone,
+                    )
+                } else {
+                    val issuer = oidcIssuer.trim()
+                    if (issuer.isEmpty()) {
+                        lastError = "OIDC issuer required"
+                        return@Button
+                    }
+                    appendLog("login → Custom Tabs PKCE ($MOBILE_REDIRECT_URI)")
+                    auth.startLogin(
+                        context = context,
+                        cfg = OidcClientConfig(issuer = issuer, clientId = DEFAULT_ANDROID_CLIENT_ID),
+                        onComplete = onDone,
+                    )
                 }
             }) { Text("Login") }
             OutlinedButton(onClick = {
@@ -328,7 +366,7 @@ private fun AtlasBotScreen() {
         }
 
         CollapsibleSection(
-            title = if (advancedOpen) "高级 · Hub URL / OIDC ▴" else "高级 · Hub URL / OIDC ▾",
+            title = if (advancedOpen) "高级 · Hub / OIDC / WeCom ▴" else "高级 · Hub / OIDC / WeCom ▾",
             open = advancedOpen,
             onToggle = { advancedOpen = !advancedOpen },
         ) {
@@ -340,9 +378,37 @@ private fun AtlasBotScreen() {
                 singleLine = true,
             )
             OutlinedTextField(
+                value = ticketProvider,
+                onValueChange = { ticketProvider = it },
+                label = { Text("ATLAS_TICKET_PROVIDER (oidc|wecom)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
                 value = oidcIssuer,
                 onValueChange = { oidcIssuer = it },
                 label = { Text("OIDC issuer (I2.2)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = wecomCorpId,
+                onValueChange = { wecomCorpId = it },
+                label = { Text("ATLAS_WECOM_CORP_ID") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = wecomAgentId,
+                onValueChange = { wecomAgentId = it },
+                label = { Text("ATLAS_WECOM_AGENT_ID") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = wecomAuthorizeBase,
+                onValueChange = { wecomAuthorizeBase = it },
+                label = { Text("ATLAS_WECOM_AUTHORIZE_BASE (mock)") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
             )
@@ -354,7 +420,7 @@ private fun AtlasBotScreen() {
                 singleLine = true,
             )
             Text(
-                "Redirect: $MOBILE_REDIRECT_URI · client_id=$DEFAULT_ANDROID_CLIENT_ID · no WebView",
+                "Redirect: $MOBILE_REDIRECT_URI · provider=$ticketProvider · no WebView · secret Hub-only",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

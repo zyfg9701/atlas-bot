@@ -75,10 +75,11 @@ class OidcAuthTest {
 
     @Test
     fun memoryTokenStore_save_load_clear() {
-        val store = MemoryTokenStore()
+        val store: TokenStore = MemoryTokenStore()
         assertNull(store.loadBearer())
         store.saveBearer("tok")
         assertEquals("tok", store.loadBearer())
+        assertNull(store.loadProvider())
         store.clear()
         assertNull(store.loadBearer())
     }

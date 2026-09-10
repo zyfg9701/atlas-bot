@@ -17,6 +17,7 @@
 		A10000000000000000000057 /* TokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* TokenStore.swift */; };
 		A10000000000000000000058 /* AuthSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* AuthSession.swift */; };
 		A10000000000000000000059 /* OidcAuthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* OidcAuthTests.swift */; };
+		A1000000000000000000005D /* WeComAuthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* WeComAuthTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +32,7 @@
 		B10000000000000000000008 /* TokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000009 /* AuthSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthSession.swift; sourceTree = "<group>"; };
 		B1000000000000000000000A /* OidcAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OidcAuthTests.swift; sourceTree = "<group>"; };
+		B1000000000000000000000D /* WeComAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeComAuthTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000040 /* AtlasBot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AtlasBot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000041 /* AtlasBotTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AtlasBotTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -76,6 +78,7 @@
 			children = (
 				B10000000000000000000005 /* HubClientEncodingTests.swift */,
 				B1000000000000000000000A /* OidcAuthTests.swift */,
+				B1000000000000000000000D /* WeComAuthTests.swift */,
 			);
 			path = AtlasBotTests;
 			sourceTree = "<group>";
@@ -195,6 +198,7 @@
 			files = (
 				A10000000000000000000055 /* HubClientEncodingTests.swift in Sources */,
 				A10000000000000000000059 /* OidcAuthTests.swift in Sources */,
+				A1000000000000000000005D /* WeComAuthTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
