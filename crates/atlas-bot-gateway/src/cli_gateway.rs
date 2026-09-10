@@ -133,6 +133,11 @@ impl CliAgentGateway {
         self.shared.turn_tx.clone()
     }
 
+    /// Configured CLI path/name (from `ATLAS_AGENT_CLI` or default `agent`).
+    pub fn cli_path(&self) -> &std::path::Path {
+        &self.shared.cli_path
+    }
+
     pub async fn snapshot_transcript(&self, agent_id: &str) -> Vec<TranscriptEntry> {
         let guard = self.shared.inner.read().await;
         guard
@@ -342,10 +347,14 @@ impl CliAgentGateway {
 
         info!(cli = %self.shared.cli_path.display(), %agent_id, "spawning agent CLI");
         let mut child = cmd.spawn().map_err(|e| {
-            GatewayError::Upstream(format!(
-                "CLI spawn failed ({}): {e}",
-                self.shared.cli_path.display()
-            ))
+            let path = self.shared.cli_path.display();
+            if e.kind() == std::io::ErrorKind::NotFound {
+                GatewayError::Upstream(format!(
+                    "CLI binary not found ({path}): install and login Cursor/Atlas agent, or set ATLAS_AGENT_CLI to a real binary (see docs/cli-primary-runbook.md)"
+                ))
+            } else {
+                GatewayError::Upstream(format!("CLI spawn failed ({path}): {e}"))
+            }
         })?;
 
         if let Some(pid) = child.id() {
@@ -401,7 +410,9 @@ impl CliAgentGateway {
                 stdout_task.abort();
                 stderr_task.abort();
                 pending.pid.store(0, Ordering::SeqCst);
-                return Err(GatewayError::Upstream("gateway/cli-timeout".into()));
+                return Err(GatewayError::Upstream(
+                    "CLI timeout (ATLAS_AGENT_CLI_TIMEOUT_MS exceeded)".into(),
+                ));
             }
         };
 
@@ -418,7 +429,7 @@ impl CliAgentGateway {
 
         if !status.success() {
             return Err(GatewayError::Upstream(format!(
-                "CLI exit {}: {}",
+                "CLI non-zero exit {}: {}",
                 status.code().unwrap_or(-1),
                 if err_text.is_empty() { text } else { err_text }
             )));

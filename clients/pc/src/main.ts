@@ -128,6 +128,19 @@ app.innerHTML = `
         </div>
 
         <div class="panel debug-section">
+          <h2>CLI primary stack</h2>
+          <p class="hint mono">主路径：先起栈再 Connect。详见 docs/cli-primary-runbook.md</p>
+          <div class="row">
+            <button id="btnCopyStackCmd" type="button" title="Copy primary start commands">复制起栈命令</button>
+            <button id="btnProbeGw" class="secondary" type="button" title="GET http://127.0.0.1:8787/healthz">探 gateway healthz</button>
+          </div>
+          <div class="mono" id="gwHealthOut">gateway: —</div>
+          <textarea id="stackCmdBox" class="mono" rows="4" readonly style="width:100%;margin-top:6px;font-size:12px">ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+# 真机: ./scripts/dev-cli-stack.sh
+# 然后 PC Connect → ws://127.0.0.1:7700/ws → Send</textarea>
+        </div>
+
+        <div class="panel debug-section">
           <h2>Desktop · attachments</h2>
           <div class="row">
             <button id="btnVnc" type="button">Open desktop</button>
@@ -190,6 +203,8 @@ const filePickMain = $<HTMLInputElement>("filePickMain");
 const tokenPaste = $<HTMLInputElement>("tokenPaste");
 const authOut = $("authOut");
 const debugPanel = $<HTMLDetailsElement>("debugPanel");
+const gwHealthOut = $("gwHealthOut");
+const stackCmdBox = $<HTMLTextAreaElement>("stackCmdBox");
 
 let sessionToken: string | undefined;
 
@@ -211,6 +226,62 @@ debugPanel.addEventListener("toggle", () => {
     /* ignore */
   }
 });
+
+const PRIMARY_STACK_CMD = `ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+# real agent on PATH:
+# ./scripts/dev-cli-stack.sh
+# then: Connect → ws://127.0.0.1:7700/ws → Send
+# docs/cli-primary-runbook.md`;
+
+$("btnCopyStackCmd").onclick = async () => {
+  stackCmdBox.value = PRIMARY_STACK_CMD;
+  try {
+    await navigator.clipboard.writeText(PRIMARY_STACK_CMD);
+    gwHealthOut.textContent = "gateway: (copied start commands to clipboard)";
+    appendLog("info", "copied CLI primary stack commands");
+  } catch {
+    stackCmdBox.select();
+    gwHealthOut.textContent = "gateway: (select+copy the commands below — clipboard unavailable)";
+  }
+};
+
+$("btnProbeGw").onclick = async () => {
+  const url = "http://127.0.0.1:8787/healthz";
+  gwHealthOut.textContent = `gateway: probing ${url} …`;
+  try {
+    const ctrl = new AbortController();
+    const t = window.setTimeout(() => ctrl.abort(), 2500);
+    const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
+    window.clearTimeout(t);
+    const textBody = await res.text();
+    let summary = `HTTP ${res.status}`;
+    try {
+      const j = JSON.parse(textBody) as {
+        ok?: boolean;
+        backend?: string;
+        agent_cli?: string;
+        agent_cli_found?: boolean;
+      };
+      summary = [
+        `backend=${j.backend ?? "?"}`,
+        `agent_cli_found=${j.agent_cli_found ?? "?"}`,
+        j.agent_cli ? `agent_cli=${j.agent_cli}` : null,
+        j.ok === false ? "ok=false" : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    } catch {
+      summary = `${summary} body=${textBody.slice(0, 120)}`;
+    }
+    gwHealthOut.textContent = `gateway: ${summary}`;
+    appendLog("info", `healthz ${url} → ${summary}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    gwHealthOut.textContent =
+      `gateway: unreachable (${msg}). Start ./scripts/dev-cli-stack.sh first — loopback only, no WAN.`;
+    appendLog("warn", `healthz failed: ${msg}`);
+  }
+};
 
 function showFail(err: DisplayError) {
   const bits = [

@@ -7,3 +7,7 @@ clients/pc/node_modules/
 clients/pc/dist/
 clients/pc/src-tauri/target/
 clients/pc/src-tauri/gen/
+
+# local cli-stack script state
+.cli-stack-pids/
+.cli-stack-logs/

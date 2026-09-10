@@ -1244,10 +1244,69 @@ pub async fn serve_http(
 }
 
 
+/// Read-only observability for gateway HTTP `/healthz` and `/stats` (no secrets).
+#[derive(Debug, Clone, Default)]
+pub struct GatewayHttpMeta {
+    /// Backend label: `cli` | `stub` | `box` | `openai` | …
+    pub backend: String,
+    /// Configured `ATLAS_AGENT_CLI` path/name when backend is cli.
+    pub agent_cli: Option<String>,
+    /// Whether the configured CLI binary resolves on disk / PATH.
+    pub agent_cli_found: Option<bool>,
+}
+
+impl GatewayHttpMeta {
+    pub fn for_backend(backend: impl Into<String>) -> Self {
+        Self {
+            backend: backend.into(),
+            agent_cli: None,
+            agent_cli_found: None,
+        }
+    }
+
+    pub fn with_cli(mut self, path: impl Into<String>, found: bool) -> Self {
+        self.agent_cli = Some(path.into());
+        self.agent_cli_found = Some(found);
+        self
+    }
+
+    fn to_json_fields(&self) -> Value {
+        let mut m = serde_json::Map::new();
+        if !self.backend.is_empty() {
+            m.insert("backend".into(), json!(self.backend));
+        }
+        if let Some(ref p) = self.agent_cli {
+            m.insert("agent_cli".into(), json!(p));
+        }
+        if let Some(f) = self.agent_cli_found {
+            m.insert("agent_cli_found".into(), json!(f));
+        }
+        Value::Object(m)
+    }
+}
+
+/// Resolve whether `cli` exists as a file path or bare PATH command name.
+pub fn resolve_agent_cli_found(cli: &Path) -> bool {
+    if cli.components().count() > 1 || cli.is_absolute() {
+        return cli.is_file();
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(cli);
+        if candidate.is_file() {
+            return true;
+        }
+    }
+    false
+}
+
 /// HTTP invoke against any [`Gateway`] (CLI / OpenAI / stub).
 #[derive(Clone)]
 struct DynHttpState {
     gw: Arc<dyn Gateway>,
+    meta: GatewayHttpMeta,
 }
 
 async fn http_invoke_dyn(
@@ -1270,32 +1329,53 @@ async fn http_vnc_descriptor_dyn(
     }
 }
 
-async fn http_healthz() -> &'static str {
-    "ok"
+async fn http_healthz_dyn(State(st): State<DynHttpState>) -> Json<Value> {
+    let mut body = st.meta.to_json_fields();
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("ok".into(), json!(true));
+    }
+    Json(body)
 }
 
-async fn http_stats(State(st): State<DynHttpState>) -> Json<Value> {
-    Json(json!({ "invoke_count": st.gw.invoke_count() }))
+async fn http_stats_dyn(State(st): State<DynHttpState>) -> Json<Value> {
+    let mut body = st.meta.to_json_fields();
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("invoke_count".into(), json!(st.gw.invoke_count()));
+    }
+    Json(body)
 }
 
 /// Serve `/invoke`, `/vnc-descriptor`, `/vnc-stub`, `/healthz`, `/stats`.
 pub fn gateway_http_router(gw: Arc<dyn Gateway>) -> Router {
+    gateway_http_router_with_meta(gw, GatewayHttpMeta::default())
+}
+
+/// Like [`gateway_http_router`] but with observability metadata on `/healthz` + `/stats`.
+pub fn gateway_http_router_with_meta(gw: Arc<dyn Gateway>, meta: GatewayHttpMeta) -> Router {
     Router::new()
         .route("/invoke", post(http_invoke_dyn))
         .route("/vnc-descriptor", post(http_vnc_descriptor_dyn))
         .route("/vnc-stub", get(http_vnc_stub))
-        .route("/healthz", get(http_healthz))
-        .route("/stats", get(http_stats))
-        .with_state(DynHttpState { gw })
+        .route("/healthz", get(http_healthz_dyn))
+        .route("/stats", get(http_stats_dyn))
+        .with_state(DynHttpState { gw, meta })
 }
 
 pub async fn serve_gateway_http(
     gw: Arc<dyn Gateway>,
     addr: std::net::SocketAddr,
 ) -> Result<(), std::io::Error> {
+    serve_gateway_http_with_meta(gw, addr, GatewayHttpMeta::default()).await
+}
+
+pub async fn serve_gateway_http_with_meta(
+    gw: Arc<dyn Gateway>,
+    addr: std::net::SocketAddr,
+    meta: GatewayHttpMeta,
+) -> Result<(), std::io::Error> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "gateway HTTP listening");
-    axum::serve(listener, gateway_http_router(gw)).await
+    info!(%addr, backend = %meta.backend, "gateway HTTP listening");
+    axum::serve(listener, gateway_http_router_with_meta(gw, meta)).await
 }
 
 pub struct HttpGatewayClient {
@@ -1675,5 +1755,19 @@ mod tests {
         let v = gw.vnc_descriptor("agt_1").await.unwrap();
         let url = v["vncUrl"].as_str().unwrap();
         assert!(url.contains("/vnc-stub?agent=agt_1"), "{url}");
+    }
+
+    #[test]
+    fn resolve_agent_cli_found_path_and_missing() {
+        let missing = PathBuf::from("/no/such/atlas-agent-cli-binary-c1");
+        assert!(!resolve_agent_cli_found(&missing));
+        // Relative mock script in-repo (when cwd is workspace root or crate).
+        let candidates = [
+            PathBuf::from("tools/mock-cli/mock-atlas-agent-cli.sh"),
+            PathBuf::from("../tools/mock-cli/mock-atlas-agent-cli.sh"),
+            PathBuf::from("../../tools/mock-cli/mock-atlas-agent-cli.sh"),
+        ];
+        let found_any = candidates.iter().any(|p| resolve_agent_cli_found(p));
+        assert!(found_any, "expected mock-cli somewhere relative to test cwd");
     }
 }

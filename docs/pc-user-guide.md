@@ -1,7 +1,7 @@
 # atlas-bot PC 使用说明
 
-> 基线：`main`@`21eddb6` + **U1 PC UI 收敛** · 客户端 `clients/pc`（Tauri 2 + TS）  
-> 本阶段是 **信息架构收敛**（Chat 主屏 +「更多/调试」折叠），**不是**最终品牌 UI / 框架重写 / I2.2。
+> 基线：`main`@`d52fa98` + **C1 CLI 主路径** · 客户端 `clients/pc`（Tauri 2 + TS）  
+> Chat 主屏 +「更多/调试」；**推荐后端 = cli gateway**（见 cli-primary-runbook）。不是最终品牌 UI / Box LLM / I2.2。
 
 ---
 
@@ -44,35 +44,39 @@
 
 ---
 
-## 3. 起服务（先 Hub，再开 PC）
+## 3. 起服务（**主路径 = CLI 栈**，再开 PC）
 
-本地最小（开发态，**不用登录**）：
-
-```bash
-# 终端 1：Hub（默认 ATLAS_AUTH_MODE=dev）
-cargo run -p atlas-bot-hub
-# ws://127.0.0.1:7700/ws
-```
-
-若要真对话后端（Box）：
+推荐：**先起 cli 栈，再 Connect**（PC 只连 Hub，不起 agent）。
 
 ```bash
-# 终端 A
-ATLAS_GATEWAY_BACKEND=box ATLAS_BOX_WORKSPACE=./data/box-workspace \
-  cargo run -p atlas-bot-gateway
+# 真机（PATH 上已登录的 agent）
+./scripts/dev-cli-stack.sh
 
-# 终端 B
-ATLAS_GATEWAY_URL=http://127.0.0.1:8787 cargo run -p atlas-bot-hub
+# 无真 agent / CI
+ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
 ```
 
-分进程 mid-turn 事件见 `docs/b1-event-ingest-runbook.md`。
+详情与环境变量见 [`docs/cli-primary-runbook.md`](./cli-primary-runbook.md)。
 
 PC：
 
 ```bash
 cd clients/pc && npm i && npm run tauri dev
+# Connect → ws://127.0.0.1:7700/ws → 选 agent → Send
 # 或 npm run dev（浏览器 WS 不能带 Authorization；oidc/static 请用 Tauri）
 ```
+
+调试区可 **复制起栈命令**，并 loopback 探 `http://127.0.0.1:8787/healthz`（`backend` / `agent_cli_found`）。
+
+### 旁路起法（非主路径）
+
+| 旁路 | 何时用 | 起法摘要 |
+|------|--------|----------|
+| **Hub-only / stub** | 协议 / UI 自测（echo） | `cargo run -p atlas-bot-hub`（**不**设 `ATLAS_GATEWAY_URL`） |
+| **box** | 私有运行时实验 | gateway `ATLAS_GATEWAY_BACKEND=box` + Hub `ATLAS_GATEWAY_URL=…` |
+| **openai** | 兼容 API | gateway `ATLAS_GATEWAY_BACKEND=openai` + 相关 `ATLAS_OPENAI_*` |
+
+分进程 mid-turn 事件见 `docs/b1-event-ingest-runbook.md`。
 
 ---
 
@@ -99,7 +103,7 @@ cd clients/pc && npm i && npm run tauri dev
 | Connect 失败 | Hub 没起，或 WS 不是 `ws://127.0.0.1:7700/ws` |
 | `unauthorized` | Hub 非 `dev` 且无有效 Bearer → Login 或粘贴票 |
 | 浏览器里带鉴权连不上 | 用 **Tauri**（`connect_ws`），或 CLI `login` |
-| sendPrompt 无内容 / echo | Hub 仍在 stub；换成 `backend=box` 或 CLI 网关 |
+| sendPrompt 无内容 / echo | Hub 仍在 stub（未设 `ATLAS_GATEWAY_URL`）；请走 **cli 主路径** `./scripts/dev-cli-stack.sh` |
 | 有对话无 mid-turn 事件 | 分进程未配 B1；或未订阅（Send 会自动订） |
 | 上传 `args_too_large` | 文件太大；换 &lt;1.5 MiB |
 | Open desktop 空白 | stub 正常；真桌面见 P5-real runbook |
@@ -119,9 +123,10 @@ cd clients/pc && npm i && npm run tauri dev
 ## 7. 相关文档
 
 - U1 手测：`docs/pc-ui-u1-checklist.md`  
+- **主路径：** [`docs/cli-primary-runbook.md`](./cli-primary-runbook.md)  
 - 阶段 runbook：`docs/P*-runbook.md`、`docs/i2-login-runbook.md`、`docs/b1-event-ingest-runbook.md`  
 - 飞天验收 / 盘古可行性：knowledge-handoff `feitian-pc-ui-convergence-acceptance.md`、`pangu-pc-ui-convergence-feasibility.md`
 
 ---
 
-**一句话：** 默认 Chat 三步（Connect → 选 agent → Send）；Cold / VNC / upload / 协议细按钮在「更多 / 调试」。
+**一句话：** 先 `./scripts/dev-cli-stack.sh`，再 Chat 三步（Connect → 选 agent → Send）；stub/box/openai 是旁路；Cold / VNC / upload 在「更多 / 调试」。

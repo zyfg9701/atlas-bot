@@ -20,8 +20,22 @@ Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gatewa
 | `crates/atlas-bot-cli` | P6 β′ thin Bot-Relay CLI (`bot_client` → Hub WS; ≠ ACP) |
 | `crates/atlas-acp-adapter` | α minimal ACP subset adapter (`:8790` → Hub bot_client) |
 | `clients/pc/` | PC bot_client (Tauri 2 + TS) |
+| `docs/cli-primary-runbook.md` | **Recommended CLI primary path** |
 | `docs/P1-runbook.md` … `docs/P6-*.md` / `runtime-boundary-runbook.md` | Phase + R1 runbooks |
 | `docs/SOURCE_REV.md` | Upstream pin |
+
+## Primary path (CLI)
+
+Recommended stack: **Hub ↔ gateway(`backend=cli`) ↔ `ATLAS_AGENT_CLI`**.
+
+```bash
+./scripts/dev-cli-stack.sh
+# or without a real agent:
+ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+```
+
+Then PC Connect → Send. Full guide: [`docs/cli-primary-runbook.md`](./docs/cli-primary-runbook.md).
+Stub / box / openai are **side paths** (see runbook table).
 
 ## Quick check
 
