@@ -45,3 +45,9 @@ See [docs/i2-login-runbook.md](../../docs/i2-login-runbook.md) § Mobile (I2.2).
 - Collapsible **更多 / 调试**: Cold status/roster, explicit subscribe/unsubscribe/transcriptTail, caps/connection_id, Log, desktop/upload placeholder.
 - Hub URL / OIDC issuer under **高级** fold; Login stays on the primary path (I2.2).
 - See [docs/mobile-user-guide.md](../../docs/mobile-user-guide.md).
+
+## W1 WeCom ticket (stub)
+
+- `auth/WeComAuth.kt` — same callback `atlasbot://auth/callback`; Hub `/auth/wecom/exchange`.
+- Provider switch: `ATLAS_TICKET_PROVIDER=wecom` (default oidc). **No WebView** primary.
+- Full Custom Tabs wiring = follow-up; PC/CLI are full-path this PR. See `docs/i2-login-runbook.md` § WeCom.

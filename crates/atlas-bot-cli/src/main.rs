@@ -1,13 +1,15 @@
-//! atlas-bot-cli — P6 β′ Bot-Relay thin client + I2.1 login/logout.
+//! atlas-bot-cli — P6 β′ Bot-Relay thin client + I2.1 / W1 login/logout.
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use atlas_bot_auth_client::mock_oidc::drive_authorize_for_code;
+use atlas_bot_auth_client::mock_wecom::drive_wecom_authorize_for_code;
 use atlas_bot_auth_client::{
-    build_authorize_request, delete_credentials, exchange_code, load_bearer, peek_sub,
-    pick_hub_bearer, redirect_port_from_env, save_credentials, start_loopback,
-    wait_for_callback, OidcClientConfig, PkcePair, StoredCredentials,
+    build_authorize_request, build_wecom_authorize_request, delete_credentials, exchange_code,
+    exchange_wecom_code, load_bearer, peek_sub, pick_hub_bearer, redirect_port_from_env,
+    save_credentials, start_loopback, wait_for_callback, OidcClientConfig, PkcePair,
+    StoredCredentials, TicketProvider, WeComClientConfig,
 };
 use atlas_bot_cli::{CliError, HubClient, DEFAULT_AGENT_ID, DEFAULT_HUB_WS};
 use clap::{Parser, Subcommand};
@@ -45,17 +47,32 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// OIDC Authorization Code + PKCE login (loopback callback).
+    /// Login (OIDC PKCE or WeCom → Hub exchange). Default provider: oidc.
     Login {
-        /// OIDC issuer base URL (…/authorize + …/token derived).
+        /// Ticket provider: `oidc` (default) or `wecom`.
+        #[arg(long, env = "ATLAS_TICKET_PROVIDER", default_value = "oidc")]
+        provider: String,
+        /// OIDC issuer base URL (…/authorize + …/token derived). Required for oidc.
         #[arg(long, env = "ATLAS_OIDC_ISSUER")]
-        issuer: String,
+        issuer: Option<String>,
         /// OIDC client_id.
         #[arg(long, env = "ATLAS_OIDC_CLIENT_ID", default_value = "atlas-bot-cli")]
         client_id: String,
         /// Optional audience hint.
         #[arg(long, env = "ATLAS_OIDC_AUDIENCE")]
         audience: Option<String>,
+        /// WeCom corp id (or ATLAS_WECOM_CORP_ID).
+        #[arg(long, env = "ATLAS_WECOM_CORP_ID")]
+        wecom_corp_id: Option<String>,
+        /// WeCom agent id.
+        #[arg(long, env = "ATLAS_WECOM_AGENT_ID")]
+        wecom_agent_id: Option<String>,
+        /// WeCom / mock authorize base (ATLAS_WECOM_AUTHORIZE_BASE or ATLAS_WECOM_API_BASE).
+        #[arg(long, env = "ATLAS_WECOM_AUTHORIZE_BASE")]
+        wecom_authorize_base: Option<String>,
+        /// Hub HTTP base for WeCom exchange (default: derive from --url / ATLAS_HUB_HTTP).
+        #[arg(long, env = "ATLAS_HUB_HTTP")]
+        hub_http: Option<String>,
     },
     /// Delete local credentials.
     Logout,
@@ -95,11 +112,40 @@ async fn main() -> ExitCode {
 async fn run(args: Args) -> Result<(), CliError> {
     match args.cmd {
         Cmd::Login {
+            provider,
             issuer,
             client_id,
             audience,
+            wecom_corp_id,
+            wecom_agent_id,
+            wecom_authorize_base,
+            hub_http,
         } => {
-            run_login(&issuer, &client_id, audience.as_deref()).await?;
+            let prov = TicketProvider::parse(&provider).ok_or_else(|| {
+                CliError::Message(format!(
+                    "unknown --provider {provider:?} (expected oidc|wecom)"
+                ))
+            })?;
+            match prov {
+                TicketProvider::Oidc => {
+                    let issuer = issuer.ok_or_else(|| {
+                        CliError::Message(
+                            "OIDC login requires --issuer / ATLAS_OIDC_ISSUER".into(),
+                        )
+                    })?;
+                    run_login_oidc(&issuer, &client_id, audience.as_deref()).await?;
+                }
+                TicketProvider::WeCom => {
+                    run_login_wecom(
+                        wecom_corp_id.as_deref(),
+                        wecom_agent_id.as_deref(),
+                        wecom_authorize_base.as_deref(),
+                        hub_http.as_deref(),
+                        &args.url,
+                    )
+                    .await?;
+                }
+            }
             return Ok(());
         }
         Cmd::Logout => {
@@ -173,7 +219,7 @@ fn resolve_bearer(cli_flag: Option<&str>) -> Result<Option<String>, CliError> {
     load_bearer().map_err(|e| CliError::Message(e.to_string()))
 }
 
-async fn run_login(
+async fn run_login_oidc(
     issuer: &str,
     client_id: &str,
     audience: Option<&str>,
@@ -199,11 +245,9 @@ async fn run_login(
 
     println!("authorize_url={}", auth_req.url);
     println!("redirect_uri={redirect_uri}");
+    println!("provider=oidc");
 
     if no_browser {
-        // CI / mock: drive authorize redirect ourselves; still need loopback
-        // OR exchange directly. Prefer: fetch code via drive, then exchange
-        // without waiting on loopback (mock never hits loopback).
         let (code, got_state) = drive_authorize_for_code(&auth_req.url)
             .await
             .map_err(|e| CliError::Message(e.to_string()))?;
@@ -212,9 +256,8 @@ async fn run_login(
                 return Err(CliError::Message("OIDC state mismatch".into()));
             }
         }
-        // Drop loopback wait — we already have the code.
         drop(wait);
-        finish_login(&cfg, &redirect_uri, &code, &auth_req.pkce.verifier).await?;
+        finish_login_oidc(&cfg, &redirect_uri, &code, &auth_req.pkce.verifier).await?;
     } else {
         open_browser(&auth_req.url);
         println!("Waiting for browser callback on {redirect_uri} …");
@@ -226,12 +269,12 @@ async fn run_login(
                 return Err(CliError::Message("OIDC state mismatch".into()));
             }
         }
-        finish_login(&cfg, &redirect_uri, &cb.code, &auth_req.pkce.verifier).await?;
+        finish_login_oidc(&cfg, &redirect_uri, &cb.code, &auth_req.pkce.verifier).await?;
     }
     Ok(())
 }
 
-async fn finish_login(
+async fn finish_login_oidc(
     cfg: &OidcClientConfig,
     redirect_uri: &str,
     code: &str,
@@ -257,10 +300,128 @@ async fn finish_login(
         expires_at,
         token_type: tr.token_type.clone(),
         subject: subject.clone(),
+        provider: Some("oidc".into()),
     };
     let path = save_credentials(&stored).map_err(|e| CliError::Message(e.to_string()))?;
     println!(
-        "login ok subject={} credentials={}",
+        "login ok provider=oidc subject={} credentials={}",
+        subject.as_deref().unwrap_or("?"),
+        path.display()
+    );
+    Ok(())
+}
+
+async fn run_login_wecom(
+    corp_id: Option<&str>,
+    agent_id: Option<&str>,
+    authorize_base: Option<&str>,
+    hub_http: Option<&str>,
+    hub_ws: &str,
+) -> Result<(), CliError> {
+    let corp_id = corp_id
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("ATLAS_WECOM_CORP_ID").ok())
+        .ok_or_else(|| CliError::Message("WeCom login requires ATLAS_WECOM_CORP_ID".into()))?;
+    let agent_id = agent_id
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("ATLAS_WECOM_AGENT_ID").ok())
+        .ok_or_else(|| CliError::Message("WeCom login requires ATLAS_WECOM_AGENT_ID".into()))?;
+    let authorize_base = authorize_base
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("ATLAS_WECOM_AUTHORIZE_BASE").ok())
+        .or_else(|| std::env::var("ATLAS_WECOM_API_BASE").ok())
+        .unwrap_or_else(|| "https://open.weixin.qq.com/connect/oauth2".into());
+    let hub_http_base = hub_http
+        .map(|s| s.trim_end_matches('/').to_string())
+        .or_else(|| std::env::var("ATLAS_HUB_HTTP").ok())
+        .unwrap_or_else(|| atlas_bot_auth_client::ws_to_http_base(hub_ws));
+
+    let cfg = WeComClientConfig {
+        corp_id,
+        agent_id,
+        authorize_base: authorize_base.trim_end_matches('/').to_string(),
+        hub_http_base,
+    };
+
+    let redirect_override = std::env::var("ATLAS_WECOM_REDIRECT_URI").ok();
+    let port = redirect_port_from_env();
+    let (_addr, loopback_uri, wait) = start_loopback(port)
+        .await
+        .map_err(|e| CliError::Message(e.to_string()))?;
+    let redirect_uri = redirect_override.unwrap_or(loopback_uri);
+
+    let state = Uuid::new_v4().to_string();
+    let auth_req = build_wecom_authorize_request(&cfg, &redirect_uri, &state)
+        .map_err(|e| CliError::Message(e.to_string()))?;
+
+    let no_browser = std::env::var("ATLAS_I2_NO_BROWSER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    println!("authorize_url={}", auth_req.url);
+    println!("redirect_uri={redirect_uri}");
+    println!("provider=wecom");
+    println!("hub_exchange={}/auth/wecom/exchange", cfg.hub_http_base);
+
+    let code = if no_browser {
+        let (code, got_state) = drive_wecom_authorize_for_code(&auth_req.url)
+            .await
+            .map_err(|e| CliError::Message(e.to_string()))?;
+        if let Some(st) = got_state {
+            if st != state {
+                return Err(CliError::Message("WeCom state mismatch".into()));
+            }
+        }
+        drop(wait);
+        code
+    } else {
+        open_browser(&auth_req.url);
+        println!("Waiting for browser callback on {redirect_uri} …");
+        let cb = wait_for_callback(wait, Duration::from_secs(180))
+            .await
+            .map_err(|e| CliError::Message(e.to_string()))?;
+        if let Some(st) = cb.state.as_deref() {
+            if st != state {
+                return Err(CliError::Message("WeCom state mismatch".into()));
+            }
+        }
+        cb.code
+    };
+
+    finish_login_wecom(&cfg.hub_http_base, &code, Some(&state)).await
+}
+
+async fn finish_login_wecom(
+    hub_http_base: &str,
+    code: &str,
+    state: Option<&str>,
+) -> Result<(), CliError> {
+    let tr = exchange_wecom_code(hub_http_base, code, state)
+        .await
+        .map_err(|e| CliError::Message(e.to_string()))?;
+    let subject = tr
+        .subject
+        .clone()
+        .or_else(|| peek_sub(&tr.access_token));
+    let expires_at = tr.expires_in.map(|s| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        now + s
+    });
+    let stored = StoredCredentials {
+        access_token: tr.access_token,
+        id_token: None,
+        refresh_token: None,
+        expires_at,
+        token_type: tr.token_type.or(Some("Bearer".into())),
+        subject: subject.clone(),
+        provider: Some("wecom".into()),
+    };
+    let path = save_credentials(&stored).map_err(|e| CliError::Message(e.to_string()))?;
+    println!(
+        "login ok provider=wecom subject={} credentials={}",
         subject.as_deref().unwrap_or("?"),
         path.display()
     );
@@ -268,7 +429,6 @@ async fn finish_login(
 }
 
 fn open_browser(url: &str) {
-    // Best-effort; ignore failures (user can paste URL).
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
@@ -286,4 +446,3 @@ fn print_tail_texts(tail: &Value) {
         }
     }
 }
-

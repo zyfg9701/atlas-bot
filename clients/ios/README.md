@@ -34,3 +34,9 @@ See [docs/i2-login-runbook.md](../../docs/i2-login-runbook.md) § Mobile (I2.2).
 - Hub URL / OIDC issuer under **高级** fold; Login stays on the primary path (I2.2).
 - Deep link `onOpenURL` / AuthSession unchanged.
 - See [docs/mobile-user-guide.md](../../docs/mobile-user-guide.md).
+
+## W1 WeCom ticket (stub)
+
+- `WeComAuth.swift` — same callback `atlasbot://auth/callback`; Hub `/auth/wecom/exchange`.
+- Provider switch: `ATLAS_TICKET_PROVIDER=wecom` (default oidc). **No WebView** primary.
+- Full ASWebAuthenticationSession wiring = follow-up; PC/CLI are full-path this PR. See `docs/i2-login-runbook.md` § WeCom.

@@ -13,6 +13,7 @@
 		A10000000000000000000054 /* BotRelayProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* BotRelayProtocol.swift */; };
 		A10000000000000000000055 /* HubClientEncodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* HubClientEncodingTests.swift */; };
 		A10000000000000000000056 /* OidcAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* OidcAuth.swift */; };
+		A1000000000000000000005C /* WeComAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000C /* WeComAuth.swift */; };
 		A10000000000000000000057 /* TokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* TokenStore.swift */; };
 		A10000000000000000000058 /* AuthSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* AuthSession.swift */; };
 		A10000000000000000000059 /* OidcAuthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* OidcAuthTests.swift */; };
@@ -26,6 +27,7 @@
 		B10000000000000000000005 /* HubClientEncodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubClientEncodingTests.swift; sourceTree = "<group>"; };
 		B10000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000000000000000000007 /* OidcAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OidcAuth.swift; sourceTree = "<group>"; };
+		B1000000000000000000000C /* WeComAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeComAuth.swift; sourceTree = "<group>"; };
 		B10000000000000000000008 /* TokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000009 /* AuthSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthSession.swift; sourceTree = "<group>"; };
 		B1000000000000000000000A /* OidcAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OidcAuthTests.swift; sourceTree = "<group>"; };
@@ -61,6 +63,7 @@
 				B10000000000000000000002 /* ContentView.swift */,
 				B10000000000000000000003 /* HubClient.swift */,
 				B10000000000000000000007 /* OidcAuth.swift */,
+				B1000000000000000000000C /* WeComAuth.swift */,
 				B10000000000000000000008 /* TokenStore.swift */,
 				B10000000000000000000009 /* AuthSession.swift */,
 				B10000000000000000000006 /* Info.plist */,
@@ -179,6 +182,7 @@
 				A10000000000000000000051 /* ContentView.swift in Sources */,
 				A10000000000000000000052 /* HubClient.swift in Sources */,
 				A10000000000000000000056 /* OidcAuth.swift in Sources */,
+				A1000000000000000000005C /* WeComAuth.swift in Sources */,
 				A10000000000000000000057 /* TokenStore.swift in Sources */,
 				A10000000000000000000058 /* AuthSession.swift in Sources */,
 				A10000000000000000000054 /* BotRelayProtocol.swift in Sources */,
