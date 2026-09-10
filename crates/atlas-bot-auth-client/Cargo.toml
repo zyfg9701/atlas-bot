@@ -3,11 +3,15 @@ name = "atlas-bot-auth-client"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "I2.1 OIDC Authorization Code + PKCE client helpers (PC/CLI shared)"
+description = "I2/W1 OIDC + WeCom ticket client helpers (PC/CLI shared)"
 
 [[bin]]
 name = "mock-oidc"
 path = "src/bin/mock-oidc.rs"
+
+[[bin]]
+name = "mock-wecom"
+path = "src/bin/mock-wecom.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }

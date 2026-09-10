@@ -20,7 +20,7 @@ pub enum CredentialError {
 /// On-disk credentials (mode 0600 when possible).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCredentials {
-    /// Token handed to Hub as `Authorization: Bearer` (prefer id_token).
+    /// Token handed to Hub as `Authorization: Bearer` (prefer id_token for OIDC).
     pub access_token: String,
     /// Optional raw id_token if distinct from access_token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,6 +33,9 @@ pub struct StoredCredentials {
     pub token_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Ticket provider: `oidc` | `wecom` (optional for backward compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// Resolve config directory: `ATLAS_BOT_CONFIG_DIR` or `dirs::config_dir()/atlas-bot`.
@@ -117,6 +120,7 @@ mod tests {
             expires_at: Some(123),
             token_type: Some("Bearer".into()),
             subject: Some("user_x".into()),
+            provider: Some("wecom".into()),
         };
         let path = save_credentials(&creds).unwrap();
         assert_eq!(path, dir.join("credentials.json"));
@@ -128,9 +132,18 @@ mod tests {
         }
         let loaded = load_credentials().unwrap().unwrap();
         assert_eq!(loaded, creds);
+        assert_eq!(loaded.provider.as_deref(), Some("wecom"));
         assert!(delete_credentials().unwrap());
         assert!(load_credentials().unwrap().is_none());
         std::env::remove_var("ATLAS_BOT_CONFIG_DIR");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_without_provider_deserializes() {
+        let raw = r#"{"access_token":"t","subject":"u"}"#;
+        let c: StoredCredentials = serde_json::from_str(raw).unwrap();
+        assert_eq!(c.access_token, "t");
+        assert!(c.provider.is_none());
     }
 }

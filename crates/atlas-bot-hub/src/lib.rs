@@ -11,6 +11,7 @@
 
 pub mod auth;
 pub mod event_ingest;
+pub mod wecom_exchange;
 
 pub use event_ingest::{
     serve_event_ingest, EventIngestConfig, DEFAULT_EVENT_BIND, ENV_ALLOW_INSECURE, ENV_EVENT_BIND,

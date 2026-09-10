@@ -1,34 +1,71 @@
-# I2 Login runbook -- PC + CLI + Mobile (OIDC Authorization Code + PKCE)
+# I2 / W1 Login runbook -- PC + CLI + Mobile (OIDC + WeCom)
 
-Baseline: I1 Hub Auth Gate already validates Bearer. I2 only obtains the ticket.
+Baseline: I1 Hub Auth Gate already validates Bearer. I2/W1 only obtain the ticket.
 No new bot.* methods. No Hub login website. No query access_token=.
 Gateway / Box unchanged for user auth.
 
 ## Ticket handed to Hub (nailed)
 
-Prefer id_token when present; else access_token if JWT.
-Hub ATLAS_AUTH_MODE=oidc verifies via JWKS (ATLAS_OIDC_JWKS_JSON).
+**OIDC:** Prefer id_token when present; else access_token if JWT.
+Hub `ATLAS_AUTH_MODE=oidc` verifies via JWKS (`ATLAS_OIDC_JWKS_JSON`).
 `hello_ack.user_id = sub`.
 
+**WeCom (W1):** Hub thin exchange mints short HS256 JWT (`ATLAS_AUTH_MODE=static` +
+`ATLAS_AUTH_JWT_SECRET`). `sub = wecom:<corpId>:<userid>`. Never hand opaque
+WeCom access_token as Hub Bearer.
+
 ## Flow (all surfaces)
+
+### OIDC (default)
 
 authorize (PKCE S256) -> redirect + code -> token endpoint
   -> local store -> WS Authorization: Bearer <id_token|jwt-access>
   -> Hub I1 -> hello_ack.user_id = sub
 
+### WeCom (W1)
+
+authorize/扫码 (state, **no PKCE**) -> redirect + code
+  -> Hub `POST /auth/wecom/exchange` (secret Hub-only)
+  -> local store (provider=wecom) -> WS Bearer <hub-jwt>
+  -> Hub I1 (static/oidc) -> hello_ack.user_id = wecom:<corpId>:<userid>
+
 ## Env
 
-- ATLAS_OIDC_ISSUER, ATLAS_OIDC_CLIENT_ID, ATLAS_OIDC_AUDIENCE
-- ATLAS_OIDC_REDIRECT_PORT (default 0 ephemeral) — PC/CLI loopback
-- ATLAS_I2_NO_BROWSER=1 for CI mock drive
-- ATLAS_BOT_CONFIG_DIR override credentials dir
-- ATLAS_HUB_BEARER optional CLI override
-- Hub: ATLAS_AUTH_MODE=oidc + ATLAS_OIDC_JWKS_JSON
-- dev (default): skip login; existing smokes stay green
+### Shared / OIDC
+
+- `ATLAS_TICKET_PROVIDER=oidc|wecom` (default **oidc**)
+- `ATLAS_OIDC_ISSUER`, `ATLAS_OIDC_CLIENT_ID`, `ATLAS_OIDC_AUDIENCE`
+- `ATLAS_OIDC_REDIRECT_PORT` (default 0 ephemeral) — PC/CLI loopback
+- `ATLAS_I2_NO_BROWSER=1` for CI mock drive (OIDC **and** WeCom)
+- `ATLAS_BOT_CONFIG_DIR` override credentials dir
+- `ATLAS_HUB_BEARER` optional CLI override
+- Hub: `ATLAS_AUTH_MODE=oidc` + `ATLAS_OIDC_JWKS_JSON` (OIDC tickets)
+- `dev` (default): skip login; existing smokes stay green
+
+### WeCom (W1)
+
+| Variable | Side | Notes |
+|----------|------|-------|
+| `ATLAS_TICKET_PROVIDER` | client | `oidc` (default) \| `wecom` |
+| `ATLAS_WECOM_CORP_ID` | Hub + client authorize URL | required on wecom path |
+| `ATLAS_WECOM_AGENT_ID` | same | required |
+| `ATLAS_WECOM_SECRET` | **Hub only** | required; **never** in mobile/PC release packages |
+| `ATLAS_WECOM_REDIRECT_URI` | client | PC loopback or `atlasbot://auth/callback` |
+| `ATLAS_WECOM_API_BASE` | Hub | default `https://qyapi.weixin.qq.com`; CI → mock-wecom base |
+| `ATLAS_WECOM_AUTHORIZE_BASE` | client | mock base or live open.weixin authorize host |
+| `ATLAS_WECOM_JWT_TTL` | Hub | optional; default 3600s |
+| `ATLAS_AUTH_JWT_SECRET` | Hub | mints/verifies exchanged JWT (`static` mode) |
+| `ATLAS_HUB_HTTP` | client | Hub HTTP for exchange (else derive from `ATLAS_HUB_WS`) |
+
+Same deploy may configure OIDC + WeCom; one login picks one provider.
+Hub does **not** need `ATLAS_AUTH_MODE=wecom`.
 
 ## Mock OIDC
 
+```bash
 cargo run -q -p atlas-bot-auth-client --bin mock-oidc
+```
+
 See tools/mock-oidc/README.md
 
 Register **both** PC loopback and mobile custom-scheme redirects on the IdP:
@@ -36,21 +73,48 @@ Register **both** PC loopback and mobile custom-scheme redirects on the IdP:
 - PC/CLI: `http://127.0.0.1:<port>/callback`
 - Mobile: `atlasbot://auth/callback`
 
-## CLI (I2.1)
+## Mock WeCom (W1)
 
-atlas-bot-cli login / logout / status
-Credentials path: ~/.config/atlas-bot/credentials.json mode 0600
-Loopback: http://127.0.0.1:<port>/callback
+```bash
+cargo run -q -p atlas-bot-auth-client --bin mock-wecom
+```
 
-## PC (I2.1)
+See tools/mock-wecom/README.md
 
-UI: Login / Logout + optional Bearer paste.
+Endpoints: `/authorize`, `/cgi-bin/gettoken`, `/cgi-bin/user/getuserinfo`.
+Point Hub `ATLAS_WECOM_API_BASE` + client `ATLAS_WECOM_AUTHORIZE_BASE` at the printed base.
+**CI never** calls `qyapi.weixin.qq.com`.
+
+Headless:
+
+```bash
+export ATLAS_I2_NO_BROWSER=1
+export ATLAS_TICKET_PROVIDER=wecom
+# … corp/agent/secret/api_base/jwt_secret/hub …
+atlas-bot-cli login --provider wecom
+```
+
+## CLI (I2.1 + W1)
+
+```bash
+atlas-bot-cli login --provider oidc --issuer …
+atlas-bot-cli login --provider wecom
+atlas-bot-cli logout
+atlas-bot-cli status
+```
+
+Credentials path: `~/.config/atlas-bot/credentials.json` mode 0600 (includes `provider`).
+Loopback: `http://127.0.0.1:<port>/callback`
+
+## PC (I2.1 + W1)
+
+UI: Login prompts for provider (`oidc`\|`wecom`) / Logout + optional Bearer paste.
 Browser WebSocket cannot set Authorization.
-Production path: Tauri connect_ws (clients/pc/src-tauri) sends Bearer on upgrade.
-HubClient.connect(url, { authorization? }) stores token; Tauri sends header.
-Under Hub dev, plain browser WS remains fine.
+Production path: Tauri `connect_ws` (clients/pc/src-tauri) sends Bearer on upgrade.
+`WeComProvider` helpers: `clients/pc/src/wecomClient.ts`.
+Under Hub `dev`, plain browser WS remains fine.
 
-## Mobile (I2.2 / M1)
+## Mobile (I2.2 / M1 + W1 stub)
 
 **Scope:** system-browser ticket pickup for Android + iOS. **Not** mobile UI
 convergence, **not** I2.3 / public IdP productization, **not** auto-login desktop /
@@ -67,7 +131,7 @@ cross-device SSO, **not** Hub-hosted login site. Gateway/Box do not validate use
 | Host / path | `auth` / `/callback` |
 | App / Universal Link | **Not done** (optional; does not block DoD) |
 
-### client_id (recommended separate public clients, same issuer)
+### client_id (OIDC; recommended separate public clients, same issuer)
 
 | Surface | client_id |
 |---------|-----------|
@@ -77,7 +141,14 @@ cross-device SSO, **not** Hub-hosted login site. Gateway/Box do not validate use
 
 Scopes default: `openid profile` (+ optional audience), same narrative as I2.1.
 
-### Android
+### WeCom mobile (W1 this PR)
+
+- **Stub + docs:** `WeComAuth.kt` / `WeComAuth.swift` nail authorize URL + Hub exchange URL +
+  `sub` mapping + same deep link. Full Custom Tabs / ASWebAuthenticationSession wiring =
+  follow-up (same shape as I2.2).
+- Register `atlasbot://auth/callback` on the WeCom app console when live-testing (yellow-tag).
+
+### Android (OIDC full)
 
 1. Set **OIDC issuer** (e.g. emulator → host mock: `http://10.0.2.2:8090`).
 2. Tap **Login** → Chrome **Custom Tabs** opens authorize (PKCE S256).
@@ -89,9 +160,7 @@ Scopes default: `openid profile` (+ optional audience), same narrative as I2.1.
 Implementation: `clients/android` — `auth/OidcAuth.kt`, `AuthSession.kt`, `TokenStore.kt`;
 `HubClient.setAuthorization` / `buildConnectRequest` (null = today's no-token / `dev`).
 
-Shape is AppAuth-equivalent (Custom Tabs + PKCE); no in-app WebView.
-
-### iOS
+### iOS (OIDC full)
 
 1. Set **OIDC issuer** (simulator: `http://127.0.0.1:8090`).
 2. Tap **Login** → **ASWebAuthenticationSession** (callbackURLScheme `atlasbot`).
@@ -107,29 +176,34 @@ Implementation: `clients/ios` — `OidcAuth.swift`, `AuthSession.swift`, `TokenS
 | Hub mode | No ticket | With ticket |
 |----------|-----------|-------------|
 | `dev` (default) | Connect works (P4 smoke unchanged) | Optional Bearer accepted |
-| `oidc` / `static` | Fail closed (`unauthorized` / -32002 or connect failure) → Login | `hello_ack.user_id=sub` (oidc) |
-
-### Smoke / tests
-
-- Android JVM: `./gradlew :app:testDebugUnitTest` — PKCE challenge, callback parse, Bearer header.
-- iOS: `xcodebuild … test` on macOS — same; Linux runners skip UI (document yellow).
-- Live: mock-oidc → Login → Connect → Hub `oidc` → `user_id=sub`. See `docs/i22-mobile-ticket-checklist.md`.
+| `oidc` / `static` | Fail closed (`unauthorized` / -32002 or connect failure) → Login | `hello_ack.user_id=sub` |
 
 ## Smoke (PC/CLI)
 
-See protocol-conformance workflow for i2_smoke.
-Expect SMOKE_OK i2 lines.
-PC unit tests cover PKCE challenge and callback parsing.
+See protocol-conformance workflow for `i2_smoke` and `wecom_smoke`.
+Expect `SMOKE_OK i2…` and `SMOKE_OK wecom…` lines.
+PC unit tests cover PKCE challenge, callback parsing, and WeCom authorize URL.
 
 ## Failure closed-set
 
 Missing / bad / expired -> Hub unauthorized (-32002).
 
-## Sec10 / §8 Known limitations (filled)
+## § WeCom known limitations (W1 §10 filled)
+
+- **`sub` mapping:** `wecom:<corpId>:<userid>` (unit-tested)
+- **Exchange:** `POST /auth/wecom/exchange`; JWT **HS256** via Hub `ATLAS_AUTH_JWT_SECRET` (static)
+- **Clients this PR:** PC **full**; CLI **full** (mock preferred); Android + iOS **stub + docs**
+- **PKCE:** WeCom web OAuth — **not supported**; use **state + one-time code** + Hub secret
+- **扫码页:** minimal authorize redirect (mock); pretty QR page = optional / not required
+- **Live WeCom yellow-tag:** optional; does not block DoD (CI uses mock-wecom only)
+- **Not done / out of scope:** T2 MSI; I2.3 Hub login site; W2 hot-path WeCom introspection;
+  WebView primary; putting `ATLAS_WECOM_SECRET` in client packages; new `bot.*`; Gateway/Box user auth
+
+## Sec10 / §8 Known limitations (I2 filled)
 
 - Ticket to Hub: id_token preferred; else JWT access_token
 - PC callback: loopback 127.0.0.1; Tauri rust WS for Bearer
-- CLI: PKCE loopback (not device-code)
+- CLI: PKCE loopback (not device-code) for OIDC; WeCom via Hub exchange
 - **Android:** AppAuth-equivalent Custom Tabs + PKCE; scheme literal `atlasbot://auth/callback`
 - **iOS:** ASWebAuthenticationSession; URL Types scheme `atlasbot`
 - **mobile client_id:** separate `atlas-bot-android` / `atlas-bot-ios` (same issuer as PC)
@@ -137,7 +211,7 @@ Missing / bad / expired -> Hub unauthorized (-32002).
 - **App / Universal Link:** Not done
 - **Paste Bearer advanced entry:** Not done on mobile (PC still has paste)
 - **iOS CI:** macOS / xcodebuild for unit tests; Linux = logic documented, handtest yellow
-- WeCom: Deferred
+- ~~WeCom: Deferred~~ → **W1 landed** (see § WeCom)
 - Hub login site: Not built (I2.3 rejected)
 - query token: Forbidden
 
@@ -149,3 +223,4 @@ Missing / bad / expired -> Hub unauthorized (-32002).
 - Not an account/org/billing product
 - Not mobile UI convergence
 - Not WebView primary login path
+- Not T2 MSI / not W2 introspection / not public IdP productization

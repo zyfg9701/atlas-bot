@@ -176,6 +176,7 @@ async fn i2_smoke_pkce_login_hub_hello_sub() {
         expires_at: None,
         token_type: Some("Bearer".into()),
         subject: Some(sub.clone()),
+        provider: Some("oidc".into()),
     };
     save_credentials(&stored).unwrap();
     assert_eq!(load_bearer().unwrap().as_deref(), Some(bearer.as_str()));

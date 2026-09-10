@@ -1,4 +1,4 @@
-//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P3.5 + I1 auth gate + B1 ingest).
+//! atlas-bot-hub — Bot-Relay WebSocket Computer Hub (P3.5 + I1 auth gate + B1 ingest + W1 WeCom exchange).
 //!
 //! Env:
 //! - `ATLAS_HUB_BIND` — default `127.0.0.1:7700`
@@ -15,19 +15,23 @@
 //!   `ATLAS_ATTACH_ROOT` — see docs/P5-real-runbook.md (read by InMemoryGateway).
 //! - `ATLAS_AUTH_MODE` / `ATLAS_AUTH_JWT_SECRET` / `ATLAS_AUTH_ALLOWLIST` /
 //!   `ATLAS_OIDC_*` — see docs/idp-runbook.md (Hub inbound only).
+//! - `ATLAS_WECOM_CORP_ID` / `ATLAS_WECOM_AGENT_ID` / `ATLAS_WECOM_SECRET` /
+//!   `ATLAS_WECOM_API_BASE` / `ATLAS_WECOM_JWT_TTL` — W1 Hub `POST /auth/wecom/exchange`
+//!   (secret Hub-only; see docs/i2-login-runbook.md § WeCom).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use atlas_bot_gateway::{serve_http, Gateway, HttpGatewayClient, InMemoryGateway};
 use atlas_bot_hub::auth::{bearer_from_authorization, AuthConfig};
+use atlas_bot_hub::wecom_exchange::{self, WeComHubConfig};
 use atlas_bot_hub::{serve_event_ingest, EventIngestConfig, Hub, Session};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
@@ -38,6 +42,7 @@ use tracing_subscriber::EnvFilter;
 struct AppState {
     hub: Arc<Hub>,
     auth: AuthConfig,
+    wecom: Option<WeComHubConfig>,
 }
 
 #[tokio::main]
@@ -52,6 +57,12 @@ async fn main() {
         .expect("ATLAS_HUB_BIND");
 
     let auth = AuthConfig::from_env();
+    let wecom = WeComHubConfig::from_env();
+    if wecom.is_some() {
+        info!("wecom exchange enabled (POST /auth/wecom/exchange)");
+    } else {
+        info!("wecom exchange not configured (set ATLAS_WECOM_* + ATLAS_AUTH_JWT_SECRET)");
+    }
 
     let (hub, gw_opt): (Arc<Hub>, Option<Arc<InMemoryGateway>>) =
         if let Ok(url) = std::env::var("ATLAS_GATEWAY_URL") {
@@ -105,12 +116,20 @@ async fn main() {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
+        .route("/auth/wecom/exchange", post(wecom_exchange_route))
         .layer(TraceLayer::new_for_http())
-        .with_state(AppState { hub, auth });
+        .with_state(AppState { hub, auth, wecom });
 
     let listener = tokio::net::TcpListener::bind(bind).await.expect("bind");
-    info!(%bind, "atlas-bot-hub listening (WS /ws)");
+    info!(%bind, "atlas-bot-hub listening (WS /ws + POST /auth/wecom/exchange)");
     axum::serve(listener, app).await.expect("serve");
+}
+
+async fn wecom_exchange_route(
+    State(st): State<AppState>,
+    Json(req): Json<wecom_exchange::ExchangeRequest>,
+) -> axum::response::Response {
+    wecom_exchange::exchange_handler(st.wecom.clone(), Json(req)).await
 }
 
 async fn ws_upgrade(

@@ -17,6 +17,12 @@ import {
   pickHubBearer,
   exchangeCode,
 } from "./authClient";
+import {
+  buildWeComAuthorizeUrl,
+  exchangeWeComCode,
+  ticketProviderFromEnv,
+  wsToHttpBase,
+} from "./wecomClient";
 
 const app = document.querySelector("#app")!;
 
@@ -40,7 +46,7 @@ app.innerHTML = `
       <span id="state" class="badge disconnected">disconnected</span>
       <button id="btnConnect" type="button">Connect</button>
       <button id="btnDisconnect" class="secondary" type="button">Disconnect</button>
-      <button id="btnLogin" type="button" title="OIDC PKCE (non-dev Hub)">Login</button>
+      <button id="btnLogin" type="button" title="OIDC PKCE or WeCom (ATLAS_TICKET_PROVIDER)">Login</button>
       <button id="btnLogout" class="secondary" type="button">Logout</button>
     </div>
   </header>
@@ -651,18 +657,69 @@ $("btnConnect").onclick = async () => {
 
 $("btnLogin").onclick = async () => {
   clearFail();
-  const issuer = (prompt("OIDC issuer (e.g. http://127.0.0.1:PORT)", "") || "").trim();
-  if (!issuer) {
-    appendLog("warn", "login cancelled — no issuer");
-    return;
-  }
-  const clientId = (prompt("client_id", "atlas-bot-pc") || "atlas-bot-pc").trim();
-  const audience = (prompt("audience (optional)", "atlas-hub") || "").trim() || undefined;
+  // ATLAS_TICKET_PROVIDER via prompt default (vite has no process.env); advanced override.
+  const providerRaw =
+    prompt("Ticket provider (oidc|wecom)", "oidc") || "oidc";
+  const provider = ticketProviderFromEnv(providerRaw);
   try {
+    if (provider === "wecom") {
+      const corpId = (prompt("ATLAS_WECOM_CORP_ID", "ww_mock_corp") || "").trim();
+      const agentId = (prompt("ATLAS_WECOM_AGENT_ID", "1000001") || "").trim();
+      const authorizeBase = (
+        prompt("WeCom authorize base (mock-wecom URL)", "http://127.0.0.1:8091") || ""
+      ).trim();
+      if (!corpId || !agentId || !authorizeBase) {
+        appendLog("warn", "login cancelled — missing wecom config");
+        return;
+      }
+      const hubHttp =
+        (prompt("Hub HTTP base for exchange", wsToHttpBase(($("url") as HTMLInputElement).value)) || "").trim() ||
+        wsToHttpBase(($("url") as HTMLInputElement).value);
+      const state = crypto.randomUUID();
+      const redirectUri =
+        prompt("redirect_uri", "http://127.0.0.1:8765/callback") ||
+        "http://127.0.0.1:8765/callback";
+      const authorizeUrl = buildWeComAuthorizeUrl({
+        authorizeBase,
+        corpId,
+        agentId,
+        redirectUri,
+        state,
+      });
+      appendLog("info", "wecom authorize_url", authorizeUrl);
+      window.open(authorizeUrl, "_blank", "noopener,noreferrer");
+      const callback = prompt(
+        "After WeCom redirects, paste the full callback URL (…?code=…&state=…)",
+      );
+      if (!callback) {
+        appendLog("warn", "login cancelled — no callback");
+        return;
+      }
+      const parsed = parseCallbackUrl(callback);
+      if (parsed.error) throw new Error(parsed.error);
+      if (!parsed.code) throw new Error("missing code");
+      if (parsed.state && parsed.state !== state) throw new Error("state mismatch");
+      const tr = await exchangeWeComCode({
+        hubHttpBase: hubHttp,
+        code: parsed.code,
+        state,
+      });
+      sessionToken = tr.access_token;
+      tokenPaste.value = tr.access_token;
+      authOut.textContent = `auth: wecom logged in subject=${tr.subject ?? "?"} — Connect uses Tauri Bearer`;
+      appendLog("info", "login ok", { provider: "wecom", subject: tr.subject });
+      return;
+    }
+
+    const issuer = (prompt("OIDC issuer (e.g. http://127.0.0.1:PORT)", "") || "").trim();
+    if (!issuer) {
+      appendLog("warn", "login cancelled — no issuer");
+      return;
+    }
+    const clientId = (prompt("client_id", "atlas-bot-pc") || "atlas-bot-pc").trim();
+    const audience = (prompt("audience (optional)", "atlas-hub") || "").trim() || undefined;
     const pkce = await generatePkce();
     const state = crypto.randomUUID();
-    // Loopback redirect — for full flow use CLI or a local helper; here we
-    // document manual callback paste for vite smoke without system browser bind.
     const redirectUri =
       prompt("redirect_uri", "http://127.0.0.1:8765/callback") ||
       "http://127.0.0.1:8765/callback";
@@ -699,7 +756,7 @@ $("btnLogin").onclick = async () => {
     sessionToken = bearer;
     tokenPaste.value = bearer;
     authOut.textContent = "auth: logged in (id_token preferred) — Connect uses Tauri Bearer when available";
-    appendLog("info", "login ok", { has_id_token: !!tr.id_token });
+    appendLog("info", "login ok", { provider: "oidc", has_id_token: !!tr.id_token });
   } catch (e) {
     showFail({ message: String(e), code: "upstream_error" });
   }
