@@ -18,7 +18,7 @@ PC (bot_client) ──WS──► Hub (:7700) ──HTTP──► atlas-bot-gate
 
 ---
 
-## 2. 一键脚本（Unix）
+## 2. 一键脚本
 
 ```bash
 # 真机（PATH 上已有已登录的 agent）
@@ -37,9 +37,26 @@ ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.s
 
 日志目录默认 `.cli-stack-logs/`（gitignore 外可本地删）。
 
-### Windows
+### Windows（一等主路径）
 
-脚本以 Unix 为先。Windows 请手动：
+```powershell
+# 真机（PATH 上已有已登录的 agent）
+.\scripts\dev-cli-stack.ps1
+
+# 若 ExecutionPolicy 拦截：
+powershell -ExecutionPolicy Bypass -File .\scripts\dev-cli-stack.ps1
+
+# 无真 agent：用 mock .cmd（纯 Win，无需 Git Bash）
+$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1
+```
+
+`dev-cli-stack.ps1` 与 Unix `.sh` **语义对等**：探测 `ATLAS_AGENT_CLI`（`Get-Command` / 路径，含 `.exe`/`.cmd`）→ 找不到 **exit 1** 且不静默 stub → 起 gateway `BACKEND=cli` + Hub `ATLAS_GATEWAY_URL`（Hub 侧 `ATLAS_GATEWAY_HTTP_BIND=off`）→ 打印 `ws://127.0.0.1:7700/ws` 与 healthz → Ctrl-C 清 PID（`.cli-stack-pids/`）与日志（`.cli-stack-logs/`）。
+
+手测勾选见 [`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)。
+
+#### 附录：手动双终端（bat）
+
+仅在无法跑 ps1 时使用：
 
 ```bat
 where agent
@@ -84,7 +101,7 @@ cd clients/pc && npm i && npm run tauri dev
 |------|------|------|
 | `ATLAS_GATEWAY_URL` | _(unset)_ | Hub：设为 `http://127.0.0.1:8787` 才走真 gateway；**unset = 嵌入 InMemory stub**（旁路） |
 | `ATLAS_GATEWAY_BACKEND` | `cli` | gateway 二进制默认 **cli** |
-| `ATLAS_AGENT_CLI` | `agent` | 本机 Cursor/Atlas agent 二进制；CI 可指 `tools/mock-cli/mock-atlas-agent-cli.sh` |
+| `ATLAS_AGENT_CLI` | `agent` | 本机 Cursor/Atlas agent 二进制；CI/Win 可指 `tools/mock-cli/mock-atlas-agent-cli.sh` 或 `.cmd` |
 | `ATLAS_AGENT_CLI_EXTRA_ARGS` | `["--output-format","text"]` | JSON 字符串数组 |
 | `ATLAS_AGENT_CLI_TIMEOUT_MS` | _(none)_ | 单 turn 软超时；超时错误可见 |
 | `ATLAS_GATEWAY_HTTP_BIND` | `127.0.0.1:8787` | gateway listen；Hub 挂远程时建议 `off` |
@@ -96,7 +113,8 @@ cd clients/pc && npm i && npm run tauri dev
 
 - **真机：** 本机已安装 **且已登录** Cursor/Atlas agent（默认命令名 `agent`）。未登录时 spawn/exit 会失败且 **可见**，不会假成功。  
 - **mock（CI/无真 agent）：**  
-  `ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh`  
+  - Unix：`ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh`  
+  - Windows：`$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"`  
   回复形如 `atlas-mock-reply agent=…`（**非** `echo:` stub）。  
 - 证据步骤见 [`cli-primary-checklist.md`](./cli-primary-checklist.md)。
 
@@ -138,20 +156,22 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 
 ---
 
-## 8. 已知限制（C1 填实）
+## 8. 已知限制（C1 + W1 填实）
 
-1. **默认 `ATLAS_AGENT_CLI`：** 名 `agent`；探测 = `command -v` / 可执行路径存在（脚本）+ gateway `resolve_agent_cli_found`（PATH 或文件）。  
+1. **默认 `ATLAS_AGENT_CLI`：** 名 `agent`；探测 = `command -v` / `Get-Command` / 可执行路径存在（脚本）+ gateway `resolve_agent_cli_found`（PATH 或文件）。  
 2. **真机登录：** 依赖 Cursor/Atlas 本机已登录；本仓不打包安装器。  
-3. **脚本平台：** `scripts/dev-cli-stack.sh` **Unix first**；Windows 见上文 `where` / 手动两终端。  
+3. **脚本平台：** Unix `scripts/dev-cli-stack.sh` + Windows `scripts/dev-cli-stack.ps1`（**语义对等**）；手动 bat 仅附录。  
 4. **C1b Hub warn：** **已做**（unset `ATLAS_GATEWAY_URL` → `warn!` + 指本 runbook）。  
-5. **PC loopback healthz：** **已做**（调试区探 `http://127.0.0.1:8787/healthz`，失败友好；另有「复制起栈命令」）。  
+5. **PC loopback healthz：** **已做**（调试区探 `http://127.0.0.1:8787/healthz`，失败友好；「复制起栈命令」双行 sh + ps1）。  
 6. Hub **默认仍可无 URL 起 stub**（不破坏单测）；改体验靠文档 + 脚本 + warn，**不**强制远程 gateway。  
-7. 未改 `bot.*`；未做 Box LLM / I2.2。
+7. 未改 `bot.*`；未做 Box LLM / I2.2。  
+8. **W1 Windows：** PowerShell **5.1+**（亦支持 7+）；mock **已交** `tools/mock-cli/mock-atlas-agent-cli.cmd`（纯 cmd；Git Bash `.sh` 仍可用作备选）；PID 清理 = `.cli-stack-pids/*.pid` + `Stop-Process`（Ctrl-C / `finally`）；与 sh 的已知差异：healthz 用 `Invoke-WebRequest`（回退 `curl.exe`），mock `.cmd` 的 `chars=` 为纯长度（无 `cksum` hash）。
 
 ---
 
 ## 9. 相关
 
 - Checklist / E1 mock：[`cli-primary-checklist.md`](./cli-primary-checklist.md)  
+- Windows 起栈：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
 - PC 使用说明：[`pc-user-guide.md`](./pc-user-guide.md)  
 - P3.5 细节：[`P3.5-runbook.md`](./P3.5-runbook.md)

@@ -135,8 +135,11 @@ app.innerHTML = `
             <button id="btnProbeGw" class="secondary" type="button" title="GET http://127.0.0.1:8787/healthz">探 gateway healthz</button>
           </div>
           <div class="mono" id="gwHealthOut">gateway: —</div>
-          <textarea id="stackCmdBox" class="mono" rows="4" readonly style="width:100%;margin-top:6px;font-size:12px">ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
-# 真机: ./scripts/dev-cli-stack.sh
+          <textarea id="stackCmdBox" class="mono" rows="8" readonly style="width:100%;margin-top:6px;font-size:12px"># Unix
+ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+# Windows (PowerShell)
+$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1
+# 真机: ./scripts/dev-cli-stack.sh  |  .\scripts\dev-cli-stack.ps1
 # 然后 PC Connect → ws://127.0.0.1:7700/ws → Send</textarea>
         </div>
 
@@ -227,9 +230,14 @@ debugPanel.addEventListener("toggle", () => {
   }
 });
 
-const PRIMARY_STACK_CMD = `ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+const PRIMARY_STACK_CMD = `# Unix
+ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh
+# Windows (PowerShell)
+$env:ATLAS_AGENT_CLI="$PWD\\tools\\mock-cli\\mock-atlas-agent-cli.cmd"; .\\scripts\\dev-cli-stack.ps1
 # real agent on PATH:
 # ./scripts/dev-cli-stack.sh
+# .\\scripts\\dev-cli-stack.ps1
+# Bypass if needed: powershell -ExecutionPolicy Bypass -File .\\scripts\\dev-cli-stack.ps1
 # then: Connect → ws://127.0.0.1:7700/ws → Send
 # docs/cli-primary-runbook.md`;
 
@@ -278,7 +286,7 @@ $("btnProbeGw").onclick = async () => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     gwHealthOut.textContent =
-      `gateway: unreachable (${msg}). Start ./scripts/dev-cli-stack.sh first — loopback only, no WAN.`;
+      `gateway: unreachable (${msg}). Start ./scripts/dev-cli-stack.sh or .\\scripts\\dev-cli-stack.ps1 first — loopback only, no WAN.`;
     appendLog("warn", `healthz failed: ${msg}`);
   }
 };
