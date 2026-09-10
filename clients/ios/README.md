@@ -13,3 +13,15 @@ xcodebuild -scheme AtlasBot -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
 Generated protocol: `GeneratedProtocol` → `third_party/xai-tool-protocol/generated/swift` (symlink).
+
+## I2.2 Mobile ticket (M1)
+
+- Login uses **ASWebAuthenticationSession + PKCE S256**. **No WebView** primary path.
+- Redirect: `atlasbot://auth/callback` (Info.plist URL Types + `callbackURLScheme=atlasbot`).
+- `client_id`: `atlas-bot-ios` (register on IdP next to PC loopback).
+- TokenStore: Keychain (`afterFirstUnlockThisDeviceOnly`); Logout clears.
+- `HubClient` optional `Authorization: Bearer` via `URLRequest`; `nil` = today's no-token (`dev`) behavior.
+- Prefer `id_token` as Hub bearer (`pickHubBearer`).
+- Linux CI: shared OIDC/PKCE unit tests require macOS/`xcodebuild`; logic is documented for handtest.
+
+See [docs/i2-login-runbook.md](../../docs/i2-login-runbook.md) § Mobile (I2.2).

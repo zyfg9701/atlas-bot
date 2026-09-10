@@ -144,6 +144,8 @@ public final class HubClient: NSObject, URLSessionWebSocketDelegate {
     private var pending: [AnyHashable: (Result<Any?, DisplayError>) -> Void] = [:]
     private var lastSeq: [String: Int64] = [:]
     private var connectContinuation: ((Result<HelloAck, DisplayError>) -> Void)?
+    /// Optional Hub Bearer. nil = today's no-token / ATLAS_AUTH_MODE=dev behavior.
+    private var authorization: String?
 
     public init(url: String = DEFAULT_HUB_WS, delegate: HubClientDelegate? = nil) {
         self.url = url
@@ -155,6 +157,23 @@ public final class HubClient: NSObject, URLSessionWebSocketDelegate {
 
     public func setUrl(_ url: String) { self.url = url }
 
+    public func setAuthorization(_ token: String?) {
+        let t = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        authorization = (t?.isEmpty == false) ? t : nil
+    }
+
+    public func getAuthorization() -> String? { authorization }
+
+    /// Build the WS upgrade request (unit-tested for optional Bearer header).
+    public func buildConnectRequest() -> URLRequest? {
+        guard let u = URL(string: url) else { return nil }
+        var request = URLRequest(url: u)
+        if let token = authorization {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
     private func setState(_ s: ConnState, detail: String? = nil) {
         connectionState = s
         delegate?.hubClient(self, didChangeState: s, detail: detail)
@@ -164,18 +183,21 @@ public final class HubClient: NSObject, URLSessionWebSocketDelegate {
         delegate?.hubClient(self, didLog: level, message: msg)
     }
 
-    public func connect(completion: @escaping (Result<HelloAck, DisplayError>) -> Void) {
+    public func connect(authorization: String? = nil, completion: @escaping (Result<HelloAck, DisplayError>) -> Void) {
+        if let authorization {
+            setAuthorization(authorization)
+        }
         disconnect()
         setState(.connecting)
         connectContinuation = completion
-        guard let u = URL(string: url) else {
+        guard let request = buildConnectRequest() else {
             let err = normalizeError(["message": "invalid url"])
             setState(.error, detail: err.message)
             completion(.failure(err))
             connectContinuation = nil
             return
         }
-        task = session.webSocketTask(with: u)
+        task = session.webSocketTask(with: request)
         task?.resume()
         receiveLoop()
         // onOpen is not explicit for URLSessionWebSocket — send hello immediately after resume.

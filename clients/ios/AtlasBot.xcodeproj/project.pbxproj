@@ -12,6 +12,10 @@
 		A10000000000000000000052 /* HubClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* HubClient.swift */; };
 		A10000000000000000000054 /* BotRelayProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* BotRelayProtocol.swift */; };
 		A10000000000000000000055 /* HubClientEncodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* HubClientEncodingTests.swift */; };
+		A10000000000000000000056 /* OidcAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* OidcAuth.swift */; };
+		A10000000000000000000057 /* TokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* TokenStore.swift */; };
+		A10000000000000000000058 /* AuthSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* AuthSession.swift */; };
+		A10000000000000000000059 /* OidcAuthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* OidcAuthTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +25,10 @@
 		B10000000000000000000004 /* BotRelayProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = BotRelayProtocol.swift; path = GeneratedProtocol/BotRelayProtocol.swift; sourceTree = "<group>"; };
 		B10000000000000000000005 /* HubClientEncodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HubClientEncodingTests.swift; sourceTree = "<group>"; };
 		B10000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10000000000000000000007 /* OidcAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OidcAuth.swift; sourceTree = "<group>"; };
+		B10000000000000000000008 /* TokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000009 /* AuthSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthSession.swift; sourceTree = "<group>"; };
+		B1000000000000000000000A /* OidcAuthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OidcAuthTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000040 /* AtlasBot.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AtlasBot.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000041 /* AtlasBotTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AtlasBotTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -52,6 +60,9 @@
 				B10000000000000000000001 /* AtlasBotApp.swift */,
 				B10000000000000000000002 /* ContentView.swift */,
 				B10000000000000000000003 /* HubClient.swift */,
+				B10000000000000000000007 /* OidcAuth.swift */,
+				B10000000000000000000008 /* TokenStore.swift */,
+				B10000000000000000000009 /* AuthSession.swift */,
 				B10000000000000000000006 /* Info.plist */,
 			);
 			path = AtlasBot;
@@ -61,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				B10000000000000000000005 /* HubClientEncodingTests.swift */,
+				B1000000000000000000000A /* OidcAuthTests.swift */,
 			);
 			path = AtlasBotTests;
 			sourceTree = "<group>";
@@ -166,6 +178,9 @@
 				A10000000000000000000050 /* AtlasBotApp.swift in Sources */,
 				A10000000000000000000051 /* ContentView.swift in Sources */,
 				A10000000000000000000052 /* HubClient.swift in Sources */,
+				A10000000000000000000056 /* OidcAuth.swift in Sources */,
+				A10000000000000000000057 /* TokenStore.swift in Sources */,
+				A10000000000000000000058 /* AuthSession.swift in Sources */,
 				A10000000000000000000054 /* BotRelayProtocol.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -175,6 +190,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000055 /* HubClientEncodingTests.swift in Sources */,
+				A10000000000000000000059 /* OidcAuthTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

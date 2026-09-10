@@ -8,8 +8,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -27,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.atlasbot.client.BotEventEnvelope
 import com.atlasbot.client.ConnState
@@ -36,6 +35,10 @@ import com.atlasbot.client.HelloAck
 import com.atlasbot.client.HubClient
 import com.atlasbot.client.HubClientListener
 import com.atlasbot.client.RosterEntry
+import com.atlasbot.client.auth.AuthSession
+import com.atlasbot.client.auth.DEFAULT_ANDROID_CLIENT_ID
+import com.atlasbot.client.auth.MOBILE_REDIRECT_URI
+import com.atlasbot.client.auth.OidcClientConfig
 
 @Composable
 fun AtlasBotApp() {
@@ -48,10 +51,17 @@ fun AtlasBotApp() {
 
 @Composable
 private fun AtlasBotScreen() {
+    val context = LocalContext.current
+    val auth = remember { AuthSession.obtain(context) }
+
     var hubUrl by remember { mutableStateOf(DEFAULT_HUB_WS) }
+    var oidcIssuer by remember { mutableStateOf("http://10.0.2.2:8090") }
     var connState by remember { mutableStateOf(ConnState.DISCONNECTED) }
     var stateDetail by remember { mutableStateOf<String?>(null) }
     var capabilities by remember { mutableStateOf("") }
+    var authStatus by remember {
+        mutableStateOf(if (auth.hasTicket()) "auth: ticket stored" else "auth: no ticket (dev OK)")
+    }
     var runState by remember { mutableStateOf("—") }
     var selectedAgent by remember { mutableStateOf("agt_1") }
     var prompt by remember { mutableStateOf("hello from android") }
@@ -84,7 +94,7 @@ private fun AtlasBotScreen() {
             override fun onHelloAck(ack: HelloAck) {
                 onMain {
                     capabilities = ack.capabilities.joinToString(", ")
-                    appendLog("hello_ack conn=${ack.connectionId} caps=${ack.capabilities}")
+                    appendLog("hello_ack conn=${ack.connectionId} user=${ack.userId} caps=${ack.capabilities}")
                 }
             }
             override fun onEvent(ev: BotEventEnvelope) {
@@ -117,6 +127,7 @@ private fun AtlasBotScreen() {
     ) {
         Text("Atlas Bot P4 (Android)", style = MaterialTheme.typography.titleLarge)
         Text("State: $connState${stateDetail?.let { " ($it)" } ?: ""}")
+        Text(authStatus, style = MaterialTheme.typography.bodySmall)
         if (lastError != null) {
             Text("Protocol error: $lastError", color = Color(0xFFB00020))
         }
@@ -128,17 +139,61 @@ private fun AtlasBotScreen() {
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
+        OutlinedTextField(
+            value = oidcIssuer,
+            onValueChange = { oidcIssuer = it },
+            label = { Text("OIDC issuer (I2.2)") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {
                 lastError = null
                 client.setUrl(hubUrl.trim())
+                client.setAuthorization(auth.currentBearer())
                 client.connect(
-                    onReady = { ack -> onMain { appendLog("ready ${ack.connectionId}") } },
+                    onReady = { ack -> onMain { appendLog("ready ${ack.connectionId} user=${ack.userId}") } },
                     onFail = { err -> onMain { lastError = err.message } },
                 )
             }) { Text("Connect") }
             Button(onClick = { client.disconnect() }) { Text("Disconnect") }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                lastError = null
+                val issuer = oidcIssuer.trim()
+                if (issuer.isEmpty()) {
+                    lastError = "OIDC issuer required"
+                    return@Button
+                }
+                appendLog("login → Custom Tabs PKCE ($MOBILE_REDIRECT_URI)")
+                auth.startLogin(
+                    context = context,
+                    cfg = OidcClientConfig(issuer = issuer, clientId = DEFAULT_ANDROID_CLIENT_ID),
+                ) { result ->
+                    onMain {
+                        result.onSuccess {
+                            authStatus = "auth: ticket stored (id_token preferred)"
+                            appendLog("login ok — Connect will send Authorization: Bearer")
+                        }.onFailure { e ->
+                            lastError = e.message
+                            appendLog("login failed: ${e.message}")
+                        }
+                    }
+                }
+            }) { Text("Login") }
+            Button(onClick = {
+                auth.logout()
+                client.setAuthorization(null)
+                client.disconnect()
+                authStatus = "auth: logged out"
+                appendLog("logout — token store cleared")
+            }) { Text("Logout") }
+        }
+        Text(
+            "Redirect: $MOBILE_REDIRECT_URI · client_id=$DEFAULT_ANDROID_CLIENT_ID · no WebView",
+            style = MaterialTheme.typography.bodySmall,
+        )
         if (capabilities.isNotEmpty()) {
             Text("Capabilities: $capabilities", style = MaterialTheme.typography.bodySmall)
         }

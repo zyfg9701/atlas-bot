@@ -74,6 +74,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // I2.2 M1: Custom Tabs (system browser) + EncryptedSharedPreferences TokenStore
+    implementation("androidx.browser:browser:1.8.0")
+    implementation("androidx.security:security-crypto:1.0.0")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     // org.json is Android-provided at runtime; needed on JVM for unit tests.

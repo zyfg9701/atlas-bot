@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct ContentView: View {
     @StateObject private var model = BotViewModel()
@@ -10,6 +13,7 @@ struct ContentView: View {
                     Text("Atlas Bot P4 (iOS)")
                         .font(.title2.bold())
                     Text("State: \(model.state.rawValue)\(model.stateDetail.map { " (\($0))" } ?? "")")
+                    Text(model.authStatus).font(.caption)
                     if let err = model.lastError {
                         Text("Protocol error: \(err)")
                             .foregroundStyle(.red)
@@ -19,10 +23,20 @@ struct ContentView: View {
                         .textFieldStyle(.roundedBorder)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
+                    TextField("OIDC issuer (I2.2)", text: $model.oidcIssuer)
+                        .textFieldStyle(.roundedBorder)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
                     HStack {
                         Button("Connect") { model.connect() }
                         Button("Disconnect") { model.disconnect() }
                     }
+                    HStack {
+                        Button("Login") { model.login() }
+                        Button("Logout") { model.logout() }
+                    }
+                    Text("Redirect: \(MOBILE_REDIRECT_URI) · client_id=\(DEFAULT_IOS_CLIENT_ID) · no WebView")
+                        .font(.caption2)
                     if !model.capabilities.isEmpty {
                         Text("Capabilities: \(model.capabilities)")
                             .font(.caption)
@@ -67,6 +81,10 @@ struct ContentView: View {
                 .padding()
             }
             .navigationTitle("Atlas Bot")
+            .onOpenURL { url in
+                // URL Types backup for atlasbot://auth/callback (ASWebAuthenticationSession is primary).
+                model.handleOpenURL(url)
+            }
         }
     }
 }
@@ -74,9 +92,11 @@ struct ContentView: View {
 @MainActor
 final class BotViewModel: ObservableObject, HubClientDelegate {
     @Published var hubUrl = DEFAULT_HUB_WS
+    @Published var oidcIssuer = "http://127.0.0.1:8090"
     @Published var state: ConnState = .disconnected
     @Published var stateDetail: String?
     @Published var capabilities = ""
+    @Published var authStatus = AuthSession.shared.hasTicket() ? "auth: ticket stored" : "auth: no ticket (dev OK)"
     @Published var runState = "—"
     @Published var selectedAgent = "agt_1"
     @Published var prompt = "hello from ios"
@@ -86,6 +106,7 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     @Published var logs: [String] = []
 
     private lazy var client: HubClient = HubClient(url: hubUrl, delegate: self)
+    private let auth = AuthSession.shared
 
     private func appendLog(_ line: String) {
         logs.insert(line, at: 0)
@@ -103,10 +124,11 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     func connect() {
         lastError = nil
         client.setUrl(hubUrl.trimmingCharacters(in: .whitespacesAndNewlines))
+        client.setAuthorization(auth.currentBearer())
         client.connect { [weak self] result in
             Task { @MainActor in
                 switch result {
-                case .success(let ack): self?.appendLog("ready \(ack.connectionId)")
+                case .success(let ack): self?.appendLog("ready \(ack.connectionId) user=\(ack.userId)")
                 case .failure(let err): self?.showErr(err)
                 }
             }
@@ -114,6 +136,51 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     }
 
     func disconnect() { client.disconnect() }
+
+    func login() {
+        lastError = nil
+        let issuer = oidcIssuer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !issuer.isEmpty else {
+            lastError = "OIDC issuer required"
+            return
+        }
+        appendLog("login → ASWebAuthenticationSession PKCE (\(MOBILE_REDIRECT_URI))")
+        let cfg = OidcClientConfig(issuer: issuer, clientId: DEFAULT_IOS_CLIENT_ID)
+        auth.startLogin(cfg: cfg) { [weak self] result in
+            Task { @MainActor in
+                switch result {
+                case .success:
+                    self?.authStatus = "auth: ticket stored (id_token preferred)"
+                    self?.appendLog("login ok — Connect will send Authorization: Bearer")
+                case .failure(let e):
+                    self?.lastError = e.localizedDescription
+                    self?.appendLog("login failed: \(e.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func logout() {
+        auth.logout()
+        client.setAuthorization(nil)
+        client.disconnect()
+        authStatus = "auth: logged out"
+        appendLog("logout — Keychain cleared")
+    }
+
+    func handleOpenURL(_ url: URL) {
+        auth.handleCallbackURL(url) { [weak self] result in
+            Task { @MainActor in
+                switch result {
+                case .success:
+                    self?.authStatus = "auth: ticket stored (id_token preferred)"
+                    self?.appendLog("login ok via onOpenURL")
+                case .failure(let e):
+                    self?.lastError = e.localizedDescription
+                }
+            }
+        }
+    }
 
     func fetchStatus() {
         client.status { [weak self] result in
@@ -209,7 +276,7 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     nonisolated func hubClient(_ client: HubClient, didHelloAck ack: HelloAck) {
         Task { @MainActor in
             self.capabilities = ack.capabilities.joined(separator: ", ")
-            self.appendLog("hello_ack conn=\(ack.connectionId)")
+            self.appendLog("hello_ack conn=\(ack.connectionId) user=\(ack.userId)")
         }
     }
 
