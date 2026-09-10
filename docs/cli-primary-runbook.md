@@ -102,8 +102,11 @@ cd clients/pc && npm i && npm run tauri dev
 | `ATLAS_GATEWAY_URL` | _(unset)_ | Hub：设为 `http://127.0.0.1:8787` 才走真 gateway；**unset = 嵌入 InMemory stub**（旁路） |
 | `ATLAS_GATEWAY_BACKEND` | `cli` | gateway 二进制默认 **cli** |
 | `ATLAS_AGENT_CLI` | `agent` | 本机 Cursor/Atlas agent 二进制；CI/Win 可指 `tools/mock-cli/mock-atlas-agent-cli.sh` 或 `.cmd` |
-| `ATLAS_AGENT_CLI_EXTRA_ARGS` | `["--output-format","text"]` | JSON 字符串数组 |
+| `ATLAS_AGENT_CLI_EXTRA_ARGS` | text 或 stream-json（见下） | JSON 字符串数组；**未设时**随 `ATLAS_AGENT_CLI_STREAM` 选默认 |
+| `ATLAS_AGENT_CLI_STREAM` | _(unset)_ | **CS1 显式 opt-in**：`1`/`true`/`yes` → 默认 EXTRA_ARGS 切 `--output-format stream-json` + `--stream-partial-output`，stdout **按行**解析 mid-turn |
 | `ATLAS_AGENT_CLI_TIMEOUT_MS` | _(none)_ | 单 turn 软超时；超时错误可见 |
+| `ATLAS_HUB_EVENT_URL` | _(unset)_ | **CS1b**：分进程时 POST RuntimeHint（与 Box B1 同）；失败只 warn。**勿与同进程 B2 bridge 双开** |
+| `ATLAS_HUB_EVENT_TOKEN` | _(unset)_ | B1 ingest Bearer / X-Atlas-Event-Token |
 | `ATLAS_GATEWAY_HTTP_BIND` | `127.0.0.1:8787` | gateway listen；Hub 挂远程时建议 `off` |
 | `ATLAS_HUB_BIND` | `127.0.0.1:7700` | Hub WS |
 
@@ -116,7 +119,48 @@ cd clients/pc && npm i && npm run tauri dev
   - Unix：`ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh`  
   - Windows：`$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"`  
   回复形如 `atlas-mock-reply agent=…`（**非** `echo:` stub）。  
-- 证据步骤见 [`cli-primary-checklist.md`](./cli-primary-checklist.md)。
+  - 流式：`MOCK_CLI_STREAM=1`（可选 `MOCK_CLI_SLEEP_MS`）打 NDJSON delta + `result`。  
+- 证据步骤见 [`cli-primary-checklist.md`](./cli-primary-checklist.md)；流式见 [`cli-streaming-checklist.md`](./cli-streaming-checklist.md)。
+
+---
+
+## 5b. CLI 流式（CS1）
+
+> 默认仍是 **text**（无 mid-turn）。设 `ATLAS_AGENT_CLI_STREAM=1` 才走真 stream-json 行协议。  
+> **禁止**假流式（把终稿切成假 delta）。不改 `bot.*`。
+
+### 真机
+
+```bash
+ATLAS_GATEWAY_BACKEND=cli \
+ATLAS_AGENT_CLI=agent \
+ATLAS_AGENT_CLI_STREAM=1 \
+  cargo run -p atlas-bot-gateway
+```
+
+需已登录 agent。Events 订阅可见 `hub:assistant_delta` / 可选 `hub:tool`，终稿仍走 sync `sendPrompt` result + `hub:turn_finished`。
+
+### mock 流式（CI / 无真 agent）
+
+```bash
+# 一条起 mock 流式输出（delta → sleep → result）
+MOCK_CLI_STREAM=1 MOCK_CLI_SLEEP_MS=80 \
+  ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh \
+  tools/mock-cli/mock-atlas-agent-cli.sh -p --output-format stream-json "hi"
+
+# 冒烟（同进程 B2）
+MOCK_CLI_STREAM=1 cargo test -p atlas-bot-hub --test cli_stream_smoke -- --nocapture --test-threads=1
+```
+
+mock 行格式：**Cursor 形 NDJSON**（`assistant` + `result`）；gateway **兼认**简易 `ATLAS_DELTA\t…` / `ATLAS_TOOL\t…`。
+
+### 分进程 B1（CS1b）
+
+设 `ATLAS_HUB_EVENT_URL=http://127.0.0.1:7701/internal/runtime-hint`（见 [`b1-event-ingest-runbook.md`](./b1-event-ingest-runbook.md)）。  
+**规则与 B1 相同：勿同开 B2 `spawn_turn_bridge` + B1 POST**（Hub 对 `turn_finished` 有去重，但 mid-turn 会双发）。
+
+手测勾选：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md)。
+
 
 ---
 
@@ -165,7 +209,8 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 5. **PC loopback healthz：** **已做**（调试区探 `http://127.0.0.1:8787/healthz`，失败友好；「复制起栈命令」双行 sh + ps1）。  
 6. Hub **默认仍可无 URL 起 stub**（不破坏单测）；改体验靠文档 + 脚本 + warn，**不**强制远程 gateway。  
 7. 未改 `bot.*`；未做 Box LLM / I2.2。  
-8. **W1 Windows：** PowerShell **5.1+**（亦支持 7+）；mock **已交** `tools/mock-cli/mock-atlas-agent-cli.cmd`（纯 cmd；Git Bash `.sh` 仍可用作备选）；PID 清理 = `.cli-stack-pids/*.pid` + `Stop-Process`（Ctrl-C / `finally`）；与 sh 的已知差异：healthz 用 `Invoke-WebRequest`（回退 `curl.exe`），mock `.cmd` 的 `chars=` 为纯长度（无 `cksum` hash）。
+8. **W1 Windows：** PowerShell **5.1+**（亦支持 7+）；mock **已交** `tools/mock-cli/mock-atlas-agent-cli.cmd`（纯 cmd；Git Bash `.sh` 仍可用作备选）；PID 清理 = `.cli-stack-pids/*.pid` + `Stop-Process`（Ctrl-C / `finally`）；与 sh 的已知差异：healthz 用 `Invoke-WebRequest`（回退 `curl.exe`），mock `.cmd` 的 `chars=` 为纯长度（无 `cksum` hash）。  
+9. **CS1 流式：** 默认 **text**；`ATLAS_AGENT_CLI_STREAM=1` opt-in（见 §5b / [`cli-streaming-checklist.md`](./cli-streaming-checklist.md) §7）。未做假流式；未改 `bot.*`。
 
 ---
 
@@ -174,4 +219,6 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 - Checklist / E1 mock：[`cli-primary-checklist.md`](./cli-primary-checklist.md)  
 - Windows 起栈：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
 - PC 使用说明：[`pc-user-guide.md`](./pc-user-guide.md)  
-- P3.5 细节：[`P3.5-runbook.md`](./P3.5-runbook.md)
+- P3.5 细节：[`P3.5-runbook.md`](./P3.5-runbook.md)  
+- CLI 流式：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md)  
+- B1 ingest：[`b1-event-ingest-runbook.md`](./b1-event-ingest-runbook.md)

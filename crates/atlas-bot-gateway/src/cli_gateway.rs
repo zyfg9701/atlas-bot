@@ -3,6 +3,11 @@
 //! `sendPrompt` spawns `ATLAS_AGENT_CLI` (default `agent`) with `-p` /
 //! `--print` and returns a **non-echo** model reply. Child processes are
 //! interruptible via `interruptAgentRun` (measurable `start_kill`).
+//!
+//! CS1 streaming (opt-in via `ATLAS_AGENT_CLI_STREAM=1`): line-read stdout,
+//! map stream-json / `ATLAS_DELTA` → [`RuntimeHint`] mid-turn, then Finished.
+//! Never fake-streams a final reply into deltas. Optional B1 POST when
+//! `ATLAS_HUB_EVENT_URL` is set (fail-warn only).
 
 #![allow(dead_code)]
 
@@ -15,12 +20,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::{info, warn};
 
 use crate::{
+    box_sidecar::{ENV_HUB_EVENT_TOKEN, ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS},
     AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
     DEFAULT_AGENT_NAME,
 };
@@ -31,8 +37,36 @@ pub const ENV_AGENT_CLI: &str = "ATLAS_AGENT_CLI";
 pub const ENV_AGENT_CLI_ARGS: &str = "ATLAS_AGENT_CLI_EXTRA_ARGS";
 /// Soft timeout for a single CLI turn (ms). 0 = no timeout.
 pub const ENV_AGENT_CLI_TIMEOUT_MS: &str = "ATLAS_AGENT_CLI_TIMEOUT_MS";
+/// Opt-in CS1 streaming: `1`/`true`/`yes` → EXTRA_ARGS default becomes
+/// `--output-format stream-json` (+ `--stream-partial-output`) and stdout is
+/// line-parsed for mid-turn [`RuntimeHint`]s. Unset = text mode (today).
+pub const ENV_AGENT_CLI_STREAM: &str = "ATLAS_AGENT_CLI_STREAM";
 
 const DEFAULT_CLI: &str = "agent";
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn default_extra_args(stream: bool) -> Vec<String> {
+    if stream {
+        vec![
+            "--output-format".into(),
+            "stream-json".into(),
+            "--stream-partial-output".into(),
+        ]
+    } else {
+        vec!["--output-format".into(), "text".into()]
+    }
+}
 
 #[derive(Default)]
 struct Inner {
@@ -57,6 +91,12 @@ struct Shared {
     cli_path: PathBuf,
     extra_args: Vec<String>,
     timeout: Option<Duration>,
+    /// CS1: line-parse stdout for mid-turn hints.
+    stream_enabled: bool,
+    /// CS1b: optional Hub ingest URL (same as Box B1).
+    event_url: Option<String>,
+    event_token: Option<String>,
+    http: reqwest::Client,
 }
 
 /// Real-dialogue gateway backed by a local Agent CLI in print mode.
@@ -70,19 +110,71 @@ impl CliAgentGateway {
         let cli_path = std::env::var(ENV_AGENT_CLI)
             .unwrap_or_else(|_| DEFAULT_CLI.to_string())
             .into();
+        let stream = env_truthy(ENV_AGENT_CLI_STREAM);
         let extra_args = std::env::var(ENV_AGENT_CLI_ARGS)
             .ok()
             .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .unwrap_or_else(|| vec!["--output-format".into(), "text".into()]);
+            .unwrap_or_else(|| default_extra_args(stream));
         let timeout = std::env::var(ENV_AGENT_CLI_TIMEOUT_MS)
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .map(Duration::from_millis);
-        Self::new(cli_path, extra_args, timeout)
+        let event_url = std::env::var(ENV_HUB_EVENT_URL)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let event_token = std::env::var(ENV_HUB_EVENT_TOKEN)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Self::new_full(cli_path, extra_args, timeout, stream, event_url, event_token)
     }
 
+    /// Text-mode constructor (no mid-turn streaming). Used by p35 smoke.
     pub fn new(cli_path: PathBuf, extra_args: Vec<String>, timeout: Option<Duration>) -> Self {
+        Self::new_full(cli_path, extra_args, timeout, false, None, None)
+    }
+
+    /// CS1 streaming constructor (same-process B2 via `turn_tx`).
+    pub fn new_streaming(
+        cli_path: PathBuf,
+        extra_args: Vec<String>,
+        timeout: Option<Duration>,
+    ) -> Self {
+        let args = if extra_args.is_empty() {
+            default_extra_args(true)
+        } else {
+            extra_args
+        };
+        Self::new_full(cli_path, args, timeout, true, None, None)
+    }
+
+    /// CS1b: streaming + optional B1 `ATLAS_HUB_EVENT_URL` POST.
+    pub fn new_with_event(
+        cli_path: PathBuf,
+        extra_args: Vec<String>,
+        timeout: Option<Duration>,
+        stream: bool,
+        event_url: Option<String>,
+        event_token: Option<String>,
+    ) -> Self {
+        let args = if extra_args.is_empty() {
+            default_extra_args(stream)
+        } else {
+            extra_args
+        };
+        Self::new_full(cli_path, args, timeout, stream, event_url, event_token)
+    }
+
+    fn new_full(
+        cli_path: PathBuf,
+        extra_args: Vec<String>,
+        timeout: Option<Duration>,
+        stream_enabled: bool,
+        event_url: Option<String>,
+        event_token: Option<String>,
+    ) -> Self {
         let (turn_tx, _) = tokio::sync::broadcast::channel(64);
         let mut agents = HashMap::new();
         agents.insert(
@@ -121,6 +213,10 @@ impl CliAgentGateway {
                 cli_path,
                 extra_args,
                 timeout,
+                stream_enabled,
+                event_url,
+                event_token,
+                http: reqwest::Client::new(),
             }),
         }
     }
@@ -326,6 +422,133 @@ impl CliAgentGateway {
         Ok((preview, vec![user_entry, assistant_entry]))
     }
 
+    /// Broadcast + optional B1 POST (fail-warn only; never blocks sendPrompt).
+    fn publish_hint(&self, hint: RuntimeHint) {
+        let _ = self.shared.turn_tx.send(hint.clone());
+        let Some(url) = self.shared.event_url.clone() else {
+            return;
+        };
+        let token = self.shared.event_token.clone();
+        let client = self.shared.http.clone();
+        tokio::spawn(async move {
+            let mut req = client
+                .post(&url)
+                .timeout(Duration::from_millis(HUB_EVENT_POST_TIMEOUT_MS))
+                .json(&hint);
+            if let Some(t) = token.as_ref() {
+                req = req
+                    .header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"))
+                    .header("X-Atlas-Event-Token", t.as_str());
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => {
+                    warn!(
+                        status = %resp.status(),
+                        %url,
+                        "B1 hub event POST non-success (ignored)"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, %url, "B1 hub event POST failed (ignored)");
+                }
+            }
+        });
+    }
+
+    fn emit_delta(&self, agent_id: &str, text: &str) {
+        let text = truncate_hint(text);
+        if text.is_empty() {
+            return;
+        }
+        self.publish_hint(RuntimeHint::AssistantDelta {
+            agent_id: agent_id.to_string(),
+            text,
+        });
+    }
+
+    fn emit_tool(&self, agent_id: &str, tool: &str, summary: &str, exit_code: Option<i32>) {
+        self.publish_hint(RuntimeHint::Tool {
+            agent_id: agent_id.to_string(),
+            tool: tool.to_string(),
+            summary: truncate_hint(summary),
+            exit_code,
+        });
+    }
+
+    /// Apply one stdout line while streaming. Returns Some(final) when `result` seen.
+    fn handle_stream_line(&self, agent_id: &str, line: &str, deltas: &mut Vec<String>) -> Option<String> {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            return None;
+        }
+
+        // Simple atlas mock lines (gateway accepts both these and NDJSON).
+        if let Some(rest) = line.strip_prefix("ATLAS_DELTA\t") {
+            self.emit_delta(agent_id, rest);
+            deltas.push(rest.to_string());
+            return None;
+        }
+        if let Some(rest) = line.strip_prefix("ATLAS_TOOL\t") {
+            let mut parts = rest.splitn(3, '\t');
+            let tool = parts.next().unwrap_or("tool");
+            let summary = parts.next().unwrap_or("");
+            let code = parts.next().and_then(|s| s.parse::<i32>().ok());
+            self.emit_tool(agent_id, tool, summary, code);
+            return None;
+        }
+
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            // Non-JSON plain line: keep as candidate final (text-mode style).
+            return None;
+        };
+        let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match ty {
+            "assistant" => {
+                if !is_assistant_partial(&v) {
+                    return None;
+                }
+                if let Some(t) = extract_assistant_text(&v) {
+                    if !t.is_empty() {
+                        self.emit_delta(agent_id, &t);
+                        deltas.push(t);
+                    }
+                }
+                None
+            }
+            "tool_call" => {
+                let status = v
+                    .get("status")
+                    .or_else(|| v.get("subtype"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                if status == "started" || status == "completed" || status.is_empty() {
+                    let tool = v
+                        .get("name")
+                        .or_else(|| v.get("tool"))
+                        .or_else(|| v.pointer("/tool_call/name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("tool_call");
+                    let summary = v
+                        .get("summary")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or(status);
+                    let exit_code = v.get("exit_code").and_then(|c| c.as_i64()).map(|c| c as i32);
+                    self.emit_tool(agent_id, tool, summary, exit_code);
+                }
+                None
+            }
+            "result" => {
+                if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
+                    Some(r.to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None, // unknown types ignored
+        }
+    }
+
     async fn run_cli(
         &self,
         agent_id: &str,
@@ -345,7 +568,12 @@ impl CliAgentGateway {
             .kill_on_drop(true)
             .stdin(Stdio::null());
 
-        info!(cli = %self.shared.cli_path.display(), %agent_id, "spawning agent CLI");
+        info!(
+            cli = %self.shared.cli_path.display(),
+            %agent_id,
+            stream = self.shared.stream_enabled,
+            "spawning agent CLI"
+        );
         let mut child = cmd.spawn().map_err(|e| {
             let path = self.shared.cli_path.display();
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -361,7 +589,7 @@ impl CliAgentGateway {
             pending.pid.store(pid, Ordering::SeqCst);
         }
 
-        let mut stdout = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| GatewayError::Upstream("CLI stdout missing".into()))?;
@@ -370,20 +598,62 @@ impl CliAgentGateway {
             .take()
             .ok_or_else(|| GatewayError::Upstream("CLI stderr missing".into()))?;
 
-        let stdout_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf).await;
-            buf
-        });
         let stderr_task = tokio::spawn(async move {
             let mut buf = Vec::new();
             let _ = stderr.read_to_end(&mut buf).await;
             buf
         });
 
-        let wait_fut = child.wait();
         let timeout = self.shared.timeout;
+        let stream = self.shared.stream_enabled;
 
+        let text = if stream {
+            self.run_cli_streaming(agent_id, prompt, &mut child, stdout, kill_rx, pending.clone(), timeout)
+                .await?
+        } else {
+            self.run_cli_text(agent_id, prompt, &mut child, stdout, kill_rx, pending.clone(), timeout)
+                .await?
+        };
+
+        pending.pid.store(0, Ordering::SeqCst);
+        let err_buf = stderr_task.await.unwrap_or_default();
+        let err_text = String::from_utf8_lossy(&err_buf).trim().to_string();
+
+        // Status already validated inside helpers when stream/text return Ok.
+        // Re-check empty / echo here for both paths.
+        if text.is_empty() {
+            return Err(GatewayError::Upstream(if err_text.is_empty() {
+                "CLI produced empty reply".into()
+            } else {
+                format!("CLI produced empty reply; stderr: {err_text}")
+            }));
+        }
+        if text == prompt || text == format!("echo: {prompt}") {
+            return Err(GatewayError::Upstream(
+                "CLI reply looked like stub echo; refusing".into(),
+            ));
+        }
+        let _ = err_text; // stderr only used for empty-reply context above
+        Ok(text)
+    }
+
+    async fn run_cli_text(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+        child: &mut tokio::process::Child,
+        mut stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+        kill_rx: oneshot::Receiver<()>,
+        pending: Arc<PendingTurn>,
+        timeout: Option<Duration>,
+    ) -> Result<String, GatewayError> {
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf).await;
+            buf
+        });
+
+        let wait_fut = child.wait();
         let status = tokio::select! {
             status = wait_fut => {
                 status.map_err(|e| GatewayError::Upstream(format!("CLI wait: {e}")))?
@@ -393,7 +663,6 @@ impl CliAgentGateway {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 stdout_task.abort();
-                stderr_task.abort();
                 pending.pid.store(0, Ordering::SeqCst);
                 return Err(GatewayError::Upstream("gateway/run-interrupted".into()));
             }
@@ -408,7 +677,6 @@ impl CliAgentGateway {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 stdout_task.abort();
-                stderr_task.abort();
                 pending.pid.store(0, Ordering::SeqCst);
                 return Err(GatewayError::Upstream(
                     "CLI timeout (ATLAS_AGENT_CLI_TIMEOUT_MS exceeded)".into(),
@@ -416,35 +684,120 @@ impl CliAgentGateway {
             }
         };
 
-        pending.pid.store(0, Ordering::SeqCst);
         let out_buf = stdout_task
             .await
             .map_err(|e| GatewayError::Upstream(format!("stdout join: {e}")))?;
-        let err_buf = stderr_task
-            .await
-            .unwrap_or_default();
-
         let text = String::from_utf8_lossy(&out_buf).trim().to_string();
-        let err_text = String::from_utf8_lossy(&err_buf).trim().to_string();
+        if !status.success() {
+            return Err(GatewayError::Upstream(format!(
+                "CLI non-zero exit {}: {text}",
+                status.code().unwrap_or(-1)
+            )));
+        }
+        let _ = prompt;
+        Ok(text)
+    }
+
+    async fn run_cli_streaming(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+        child: &mut tokio::process::Child,
+        stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+        kill_rx: oneshot::Receiver<()>,
+        pending: Arc<PendingTurn>,
+        timeout: Option<Duration>,
+    ) -> Result<String, GatewayError> {
+        let this = self.clone();
+        let agent = agent_id.to_string();
+        let (parsed_tx, parsed_rx) = oneshot::channel::<(Option<String>, Vec<String>, String)>();
+
+        let reader_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout);
+            let mut deltas: Vec<String> = Vec::new();
+            let mut final_from_result: Option<String> = None;
+            let mut plain = String::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches(['\r', '\n']);
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        // Plain non-protocol line (text fallback / final mock line).
+                        let is_json = trimmed.starts_with('{');
+                        let is_atlas = trimmed.starts_with("ATLAS_");
+                        if let Some(fin) = this.handle_stream_line(&agent, trimmed, &mut deltas) {
+                            final_from_result = Some(fin);
+                        } else if !is_json && !is_atlas {
+                            if !plain.is_empty() {
+                                plain.push('\n');
+                            }
+                            plain.push_str(trimmed);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = parsed_tx.send((final_from_result, deltas, plain));
+        });
+
+        let wait_fut = child.wait();
+        let status = tokio::select! {
+            status = wait_fut => {
+                status.map_err(|e| GatewayError::Upstream(format!("CLI wait: {e}")))?
+            }
+            _ = kill_rx => {
+                warn!(%agent_id, pid = pending.pid.load(Ordering::SeqCst), "CLI kill via interrupt");
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                reader_task.abort();
+                pending.pid.store(0, Ordering::SeqCst);
+                return Err(GatewayError::Upstream("gateway/run-interrupted".into()));
+            }
+            _ = async {
+                if let Some(t) = timeout {
+                    tokio::time::sleep(t).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                warn!(%agent_id, "CLI soft timeout — killing");
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                reader_task.abort();
+                pending.pid.store(0, Ordering::SeqCst);
+                return Err(GatewayError::Upstream(
+                    "CLI timeout (ATLAS_AGENT_CLI_TIMEOUT_MS exceeded)".into(),
+                ));
+            }
+        };
+
+        // Ensure reader finishes after process exit (EOF).
+        let _ = reader_task.await;
+        let (final_from_result, deltas, plain) = parsed_rx.await.unwrap_or((None, Vec::new(), String::new()));
 
         if !status.success() {
             return Err(GatewayError::Upstream(format!(
-                "CLI non-zero exit {}: {}",
-                status.code().unwrap_or(-1),
-                if err_text.is_empty() { text } else { err_text }
+                "CLI non-zero exit {}",
+                status.code().unwrap_or(-1)
             )));
         }
-        if text.is_empty() {
-            return Err(GatewayError::Upstream(
-                "CLI produced empty reply".into(),
-            ));
-        }
-        // Hard non-echo guard for acceptance: refuse pure echo of the prompt.
-        if text == prompt || text == format!("echo: {prompt}") {
-            return Err(GatewayError::Upstream(
-                "CLI reply looked like stub echo; refusing".into(),
-            ));
-        }
+
+        // Prefer result.result; else joined deltas; else plain text lines.
+        let text = if let Some(r) = final_from_result {
+            r.trim().to_string()
+        } else if !plain.trim().is_empty() {
+            plain.trim().to_string()
+        } else if !deltas.is_empty() {
+            deltas.join("")
+        } else {
+            String::new()
+        };
+        let _ = prompt;
         Ok(text)
     }
 
@@ -474,7 +827,7 @@ impl CliAgentGateway {
         match cli_result {
             Ok(reply) => {
                 let (preview, entries) = self.commit_turn(agent_id, &prompt, &reply).await?;
-                let _ = self.shared.turn_tx.send(RuntimeHint::Finished {
+                self.publish_hint(RuntimeHint::Finished {
                     agent_id: agent_id.to_string(),
                     preview: preview.clone(),
                     user_text: prompt.clone(),
@@ -609,4 +962,50 @@ impl Gateway for Arc<CliAgentGateway> {
     fn invoke_count(&self) -> u64 {
         (**self).invoke_count()
     }
+}
+
+fn truncate_hint(s: &str) -> String {
+    const MAX: usize = 64 * 1024;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        let mut t = s.chars().take(MAX).collect::<String>();
+        t.push('…');
+        t
+    }
+}
+
+/// Cursor stream-json partial filter: prefer `timestamp_ms` without `model_call_id`.
+/// Also accept mock/simple assistant rows that lack both fields (no model_call_id).
+fn is_assistant_partial(v: &Value) -> bool {
+    let has_model = v.get("model_call_id").is_some();
+    let has_ts = v.get("timestamp_ms").is_some();
+    if has_model && !has_ts {
+        return false;
+    }
+    if has_ts && !has_model {
+        return true;
+    }
+    // Soft fallback for mock NDJSON without Cursor partial markers.
+    !has_model
+}
+
+fn extract_assistant_text(v: &Value) -> Option<String> {
+    if let Some(arr) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+        let mut out = String::new();
+        for part in arr {
+            if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push_str(t);
+                }
+            }
+        }
+        if !out.is_empty() {
+            return Some(out);
+        }
+    }
+    v.get("text")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
