@@ -59,6 +59,9 @@ async fn main() {
             let client: Arc<dyn Gateway> = Arc::new(HttpGatewayClient::new(url));
             (Hub::new(client), None)
         } else {
+            warn!(
+                "ATLAS_GATEWAY_URL unset — using embedded InMemory stub (echo). True CLI path needs ATLAS_GATEWAY_URL + atlas-bot-gateway backend=cli; see docs/cli-primary-runbook.md"
+            );
             let (hub, gw) = Hub::with_in_memory_gateway();
             hub.spawn_turn_bridge(gw.subscribe_turns());
             (hub, Some(gw))
