@@ -114,7 +114,7 @@ Production path: Tauri `connect_ws` (clients/pc/src-tauri) sends Bearer on upgra
 `WeComProvider` helpers: `clients/pc/src/wecomClient.ts`.
 Under Hub `dev`, plain browser WS remains fine.
 
-## Mobile (I2.2 / M1 + W1 stub)
+## Mobile (I2.2 / M1 + WM1 WeCom real Login)
 
 **Scope:** system-browser ticket pickup for Android + iOS. **Not** mobile UI
 convergence, **not** I2.3 / public IdP productization, **not** auto-login desktop /
@@ -141,12 +141,40 @@ cross-device SSO, **not** Hub-hosted login site. Gateway/Box do not validate use
 
 Scopes default: `openid profile` (+ optional audience), same narrative as I2.1.
 
-### WeCom mobile (W1 this PR)
+### WeCom mobile (WM1 — real Login)
 
-- **Stub + docs:** `WeComAuth.kt` / `WeComAuth.swift` nail authorize URL + Hub exchange URL +
-  `sub` mapping + same deep link. Full Custom Tabs / ASWebAuthenticationSession wiring =
-  follow-up (same shape as I2.2).
-- Register `atlasbot://auth/callback` on the WeCom app console when live-testing (yellow-tag).
+Android **and** iOS wire W1 stubs into the same I2.2 session skeleton:
+
+1. Set **ATLAS_TICKET_PROVIDER=wecom** (advanced UI field; default remains **oidc**).
+2. Fill corpId / agentId / authorize base (mock-wecom URL for CI/local).
+3. Tap **Login** → system browser (**Custom Tabs** / **ASWebAuthenticationSession**), **no WebView**,
+   authorize URL from `WeComAuth.buildAuthorizeUrl` (corpId/agentId/state; **no PKCE**).
+4. Callback `atlasbot://auth/callback?code=…&state=…` — state mismatch fails observably.
+5. App `POST {hubHttp}/auth/wecom/exchange` JSON `{code,state?}` (same shape as PC
+   `exchangeWeComCode`) → Hub JWT `access_token` → TokenStore (optional `provider=wecom`).
+6. Tap **Connect** → existing HubClient Bearer → `hello_ack.user_id=wecom:<corpId>:<userid>`.
+7. **Logout** clears TokenStore (and provider).
+
+**Config (mobile):**
+
+| Item | Where |
+|------|--------|
+| `ATLAS_TICKET_PROVIDER` | advanced field / env (default `oidc`) |
+| `ATLAS_WECOM_CORP_ID` / `AGENT_ID` | advanced fields |
+| `ATLAS_WECOM_AUTHORIZE_BASE` | mock-wecom base (e.g. emulator `http://10.0.2.2:8091`) |
+| Hub HTTP for exchange | derived from Hub WS URL (`ws→http`, strip `/ws`) |
+| Secret | **Hub only** — never in APK/IPA |
+
+**Mock:** `cargo run -q -p atlas-bot-auth-client --bin mock-wecom` + Hub static JWT +
+`ATLAS_WECOM_API_BASE=<mock>` (see § Mock WeCom). CI must not hit `qyapi.weixin.qq.com`.
+
+**OIDC switch:** leave provider=`oidc` — I2.2 PKCE path unchanged. Same install may hold both
+configs; one Login uses the current provider only.
+
+**Not this slice:** T2 MSI; mobile UI re-convergence; I2.3; W2 introspection; WebView primary;
+new `bot.*`; Gateway/Box user-ticket validation.
+
+Register `atlasbot://auth/callback` on the WeCom app console for live yellow-tag (optional; not DoD).
 
 ### Android (OIDC full)
 
@@ -192,7 +220,7 @@ Missing / bad / expired -> Hub unauthorized (-32002).
 
 - **`sub` mapping:** `wecom:<corpId>:<userid>` (unit-tested)
 - **Exchange:** `POST /auth/wecom/exchange`; JWT **HS256** via Hub `ATLAS_AUTH_JWT_SECRET` (static)
-- **Clients this PR:** PC **full**; CLI **full** (mock preferred); Android + iOS **stub + docs**
+- **Clients:** PC **full**; CLI **full** (mock preferred); Android + iOS **WM1 real Login** (system browser → Hub exchange)
 - **PKCE:** WeCom web OAuth — **not supported**; use **state + one-time code** + Hub secret
 - **扫码页:** minimal authorize redirect (mock); pretty QR page = optional / not required
 - **Live WeCom yellow-tag:** optional; does not block DoD (CI uses mock-wecom only)
@@ -204,8 +232,8 @@ Missing / bad / expired -> Hub unauthorized (-32002).
 - Ticket to Hub: id_token preferred; else JWT access_token
 - PC callback: loopback 127.0.0.1; Tauri rust WS for Bearer
 - CLI: PKCE loopback (not device-code) for OIDC; WeCom via Hub exchange
-- **Android:** AppAuth-equivalent Custom Tabs + PKCE; scheme literal `atlasbot://auth/callback`
-- **iOS:** ASWebAuthenticationSession; URL Types scheme `atlasbot`
+- **Android:** Custom Tabs + PKCE (OIDC) / WeCom authorize (no PKCE) → Hub exchange; scheme `atlasbot://auth/callback`
+- **iOS:** ASWebAuthenticationSession; OIDC PKCE or WeCom → Hub exchange; URL Types scheme `atlasbot`
 - **mobile client_id:** separate `atlas-bot-android` / `atlas-bot-ios` (same issuer as PC)
 - **refresh:** Not done — expire then re-login
 - **App / Universal Link:** Not done

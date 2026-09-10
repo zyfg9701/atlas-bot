@@ -2,32 +2,67 @@ import Foundation
 import Security
 
 public protocol TokenStore {
-    func saveBearer(_ token: String)
+    func saveBearer(_ token: String, provider: String?)
     func loadBearer() -> String?
+    func loadProvider() -> String?
     func clear()
+}
+
+public extension TokenStore {
+    func saveBearer(_ token: String) { saveBearer(token, provider: nil) }
 }
 
 public final class MemoryTokenStore: TokenStore {
     private var bearer: String?
+    private var provider: String?
     public init() {}
-    public func saveBearer(_ token: String) { bearer = token }
+    public func saveBearer(_ token: String, provider: String?) {
+        bearer = token
+        self.provider = provider
+    }
     public func loadBearer() -> String? { bearer }
-    public func clear() { bearer = nil }
+    public func loadProvider() -> String? { provider }
+    public func clear() {
+        bearer = nil
+        provider = nil
+    }
 }
 
 /// Keychain store (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`).
 public final class KeychainTokenStore: TokenStore {
     private let service: String
     private let account: String
+    private let providerAccount: String
 
-    public init(service: String = "com.atlasbot.client.auth", account: String = "hub_bearer") {
+    public init(
+        service: String = "com.atlasbot.client.auth",
+        account: String = "hub_bearer",
+        providerAccount: String = "ticket_provider"
+    ) {
         self.service = service
         self.account = account
+        self.providerAccount = providerAccount
     }
 
-    public func saveBearer(_ token: String) {
+    public func saveBearer(_ token: String, provider: String?) {
         clear()
-        let data = Data(token.utf8)
+        write(account: account, value: token)
+        if let provider, !provider.isEmpty {
+            write(account: providerAccount, value: provider)
+        }
+    }
+
+    public func loadBearer() -> String? { read(account: account) }
+
+    public func loadProvider() -> String? { read(account: providerAccount) }
+
+    public func clear() {
+        delete(account: account)
+        delete(account: providerAccount)
+    }
+
+    private func write(account: String, value: String) {
+        let data = Data(value.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -38,7 +73,7 @@ public final class KeychainTokenStore: TokenStore {
         SecItemAdd(query as CFDictionary, nil)
     }
 
-    public func loadBearer() -> String? {
+    private func read(account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -52,7 +87,7 @@ public final class KeychainTokenStore: TokenStore {
         return String(data: data, encoding: .utf8)
     }
 
-    public func clear() {
+    private func delete(account: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

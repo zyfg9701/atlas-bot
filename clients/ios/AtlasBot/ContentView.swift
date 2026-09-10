@@ -35,7 +35,23 @@ struct ContentView: View {
                             .textFieldStyle(.roundedBorder)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
+                        TextField("ATLAS_TICKET_PROVIDER (oidc|wecom)", text: $model.ticketProvider)
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
                         TextField("OIDC issuer (I2.2)", text: $model.oidcIssuer)
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        TextField("ATLAS_WECOM_CORP_ID", text: $model.wecomCorpId)
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        TextField("ATLAS_WECOM_AGENT_ID", text: $model.wecomAgentId)
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        TextField("ATLAS_WECOM_AUTHORIZE_BASE (mock)", text: $model.wecomAuthorizeBase)
                             .textFieldStyle(.roundedBorder)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
@@ -43,10 +59,10 @@ struct ContentView: View {
                             .textFieldStyle(.roundedBorder)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
-                        Text("Redirect: \(MOBILE_REDIRECT_URI) · client_id=\(DEFAULT_IOS_CLIENT_ID) · no WebView")
+                        Text("Redirect: \(MOBILE_REDIRECT_URI) · provider=\(model.ticketProvider) · no WebView · secret Hub-only")
                             .font(.caption2)
                     } label: {
-                        Text("高级 · Hub URL / OIDC")
+                        Text("高级 · Hub / OIDC / WeCom")
                             .font(.subheadline.weight(.semibold))
                     }
 
@@ -163,6 +179,11 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
 
     @Published var hubUrl = DEFAULT_HUB_WS
     @Published var oidcIssuer = "http://127.0.0.1:8090"
+    /// ATLAS_TICKET_PROVIDER (default oidc); advanced field — thin Login fork only.
+    @Published var ticketProvider = ProcessInfo.processInfo.environment["ATLAS_TICKET_PROVIDER"].map { ticketProviderFromEnv($0) } ?? "oidc"
+    @Published var wecomCorpId = ProcessInfo.processInfo.environment["ATLAS_WECOM_CORP_ID"] ?? "ww_mock_corp"
+    @Published var wecomAgentId = ProcessInfo.processInfo.environment["ATLAS_WECOM_AGENT_ID"] ?? "1000001"
+    @Published var wecomAuthorizeBase = ProcessInfo.processInfo.environment["ATLAS_WECOM_AUTHORIZE_BASE"] ?? "http://127.0.0.1:8091"
     @Published var bearerPaste = ""
     @Published var state: ConnState = .disconnected
     @Published var stateDetail: String?
@@ -224,24 +245,46 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
 
     func login() {
         lastError = nil
-        let issuer = oidcIssuer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !issuer.isEmpty else {
-            lastError = "OIDC issuer required"
-            return
-        }
-        appendLog("login → ASWebAuthenticationSession PKCE (\(MOBILE_REDIRECT_URI))")
-        let cfg = OidcClientConfig(issuer: issuer, clientId: DEFAULT_IOS_CLIENT_ID)
-        authSession.startLogin(cfg: cfg) { [weak self] result in
+        let provider = ticketProviderFromEnv(ticketProvider)
+        let onDone: (Result<String, Error>) -> Void = { [weak self] result in
             Task { @MainActor in
                 switch result {
                 case .success:
-                    self?.authStatus = "auth: ticket stored (id_token preferred)"
-                    self?.appendLog("login ok — Connect will send Authorization: Bearer")
+                    let p = self?.authSession.currentProvider() ?? provider
+                    self?.authStatus = "auth: ticket stored (provider=\(p))"
+                    self?.appendLog("login ok (\(p)) — Connect will send Authorization: Bearer")
                 case .failure(let e):
                     self?.lastError = e.localizedDescription
                     self?.appendLog("login failed: \(e.localizedDescription)")
                 }
             }
+        }
+        if provider == WeComAuth.provider {
+            let corp = wecomCorpId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let agent = wecomAgentId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let authBase = wecomAuthorizeBase.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !corp.isEmpty, !agent.isEmpty, !authBase.isEmpty else {
+                lastError = "WeCom corpId/agentId/authorizeBase required"
+                return
+            }
+            let hubHttp = wsToHttpBase(hubUrl)
+            appendLog("login → ASWebAuthenticationSession WeCom (\(MOBILE_REDIRECT_URI)) hub=\(hubHttp)")
+            let cfg = WeComAuth.Config(
+                corpId: corp,
+                agentId: agent,
+                authorizeBase: authBase,
+                hubHttpBase: hubHttp
+            )
+            authSession.startWeComLogin(cfg: cfg, completion: onDone)
+        } else {
+            let issuer = oidcIssuer.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !issuer.isEmpty else {
+                lastError = "OIDC issuer required"
+                return
+            }
+            appendLog("login → ASWebAuthenticationSession PKCE (\(MOBILE_REDIRECT_URI))")
+            let cfg = OidcClientConfig(issuer: issuer, clientId: DEFAULT_IOS_CLIENT_ID)
+            authSession.startLogin(cfg: cfg, completion: onDone)
         }
     }
 
@@ -258,8 +301,9 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
             Task { @MainActor in
                 switch result {
                 case .success:
-                    self?.authStatus = "auth: ticket stored (id_token preferred)"
-                    self?.appendLog("login ok via onOpenURL")
+                    let p = self?.authSession.currentProvider() ?? "?"
+                    self?.authStatus = "auth: ticket stored (provider=\(p))"
+                    self?.appendLog("login ok via onOpenURL (\(p))")
                 case .failure(let e):
                     self?.lastError = e.localizedDescription
                 }
