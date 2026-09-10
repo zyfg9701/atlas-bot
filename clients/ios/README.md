@@ -25,3 +25,12 @@ Generated protocol: `GeneratedProtocol` → `third_party/xai-tool-protocol/gener
 - Linux CI: shared OIDC/PKCE unit tests require macOS/`xcodebuild`; logic is documented for handtest.
 
 See [docs/i2-login-runbook.md](../../docs/i2-login-runbook.md) § Mobile (I2.2).
+
+
+## MU1 Mobile UI convergence
+
+- Default **Chat** primary: Connect, Login/Logout, agent picker, Conversation, Send (auto-subscribe).
+- Collapsible **更多 / 调试** (`DisclosureGroup`): Cold status/roster, explicit subscribe/unsubscribe/transcriptTail, caps/connection_id, Log, desktop/upload placeholder.
+- Hub URL / OIDC issuer under **高级** fold; Login stays on the primary path (I2.2).
+- Deep link `onOpenURL` / AuthSession unchanged.
+- See [docs/mobile-user-guide.md](../../docs/mobile-user-guide.md).

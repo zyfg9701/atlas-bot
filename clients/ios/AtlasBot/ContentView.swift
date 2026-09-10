@@ -10,23 +10,17 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Atlas Bot P4 (iOS)")
+                    // —— Top bar: Chat primary ——
+                    Text("Atlas Bot · Chat")
                         .font(.title2.bold())
                     Text("State: \(model.state.rawValue)\(model.stateDetail.map { " (\($0))" } ?? "")")
                     Text(model.authStatus).font(.caption)
-                    if let err = model.lastError {
-                        Text("Protocol error: \(err)")
-                            .foregroundStyle(.red)
+                    if model.state == .disconnected {
+                        Text("开发态：dev Hub 无票可连 · Login 仍在主路径")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
 
-                    TextField("Hub WS URL", text: $model.hubUrl)
-                        .textFieldStyle(.roundedBorder)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    TextField("OIDC issuer (I2.2)", text: $model.oidcIssuer)
-                        .textFieldStyle(.roundedBorder)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
                     HStack {
                         Button("Connect") { model.connect() }
                         Button("Disconnect") { model.disconnect() }
@@ -35,47 +29,118 @@ struct ContentView: View {
                         Button("Login") { model.login() }
                         Button("Logout") { model.logout() }
                     }
-                    Text("Redirect: \(MOBILE_REDIRECT_URI) · client_id=\(DEFAULT_IOS_CLIENT_ID) · no WebView")
-                        .font(.caption2)
-                    if !model.capabilities.isEmpty {
-                        Text("Capabilities: \(model.capabilities)")
-                            .font(.caption)
+
+                    DisclosureGroup(isExpanded: $model.advancedOpen) {
+                        TextField("Hub WS URL", text: $model.hubUrl)
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        TextField("OIDC issuer (I2.2)", text: $model.oidcIssuer)
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        TextField("Paste Bearer (optional)", text: $model.bearerPaste)
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        Text("Redirect: \(MOBILE_REDIRECT_URI) · client_id=\(DEFAULT_IOS_CLIENT_ID) · no WebView")
+                            .font(.caption2)
+                    } label: {
+                        Text("高级 · Hub URL / OIDC")
+                            .font(.subheadline.weight(.semibold))
                     }
 
-                    Text("Cold path").font(.headline)
-                    HStack {
-                        Button("status") { model.fetchStatus() }
-                        Button("roster") { model.fetchRoster() }
-                    }
-                    Text("runState: \(model.runState)")
-                    ForEach(model.roster) { a in
-                        Text("• \(a.agentId)  \(a.name)  (\(a.status))")
+                    if let err = model.lastError {
+                        Text("Protocol error: \(err)")
+                            .foregroundStyle(.red)
                     }
 
-                    Text("Hot path").font(.headline)
-                    TextField("agentId", text: $model.selectedAgent)
+                    // —— Agent picker ——
+                    Text("Agent").font(.headline)
+                    Picker("Agent", selection: $model.selectedAgent) {
+                        if model.roster.isEmpty {
+                            Text(model.selectedAgent).tag(model.selectedAgent)
+                        } else {
+                            ForEach(model.roster) { a in
+                                Text("\(a.agentId)  \(a.name)  (\(a.status))").tag(a.agentId)
+                            }
+                            if !model.roster.contains(where: { $0.agentId == model.selectedAgent }) {
+                                Text(model.selectedAgent).tag(model.selectedAgent)
+                            }
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    TextField("agentId (hand-fill)", text: $model.selectedAgent)
                         .textFieldStyle(.roundedBorder)
                         .autocapitalization(.none)
-                    HStack {
-                        Button("subscribe") { model.subscribe() }
-                        Button("unsubscribe") { model.unsubscribe() }
+                    Text("Connect 后自动 roster；Send 时未订则自动 subscribe。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    // —— Conversation ——
+                    Text("Conversation").font(.headline)
+                    Group {
+                        if model.conversation.isEmpty {
+                            Text("(empty — Connect → Send；turn_finished 后自动刷新 transcript)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(Array(model.conversation.suffix(80).enumerated()), id: \.offset) { _, line in
+                                Text(line).font(.caption.monospaced())
+                            }
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(minHeight: 100)
+
                     TextField("prompt", text: $model.prompt)
                         .textFieldStyle(.roundedBorder)
                     HStack {
-                        Button("sendPrompt") { model.sendPrompt() }
-                        Button("transcriptTail") { model.refreshTranscript() }
+                        Button("Send") { model.sendPrompt() }
+                        Text("🖥📎 未接线 — 见调试占位")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
 
-                    Text("Transcript").font(.headline)
-                    Text(model.transcript.isEmpty
-                        ? "(none yet — wait for hub:turn_finished then refresh)"
-                        : model.transcript)
-                        .font(.body.monospaced())
+                    // —— More / Debug ——
+                    DisclosureGroup(isExpanded: $model.debugOpen) {
+                        Text("Cold path").font(.subheadline.weight(.semibold))
+                        HStack {
+                            Button("status") { model.fetchStatus() }
+                            Button("roster") { model.fetchRoster() }
+                        }
+                        Text("runState: \(model.runState)").font(.caption)
+                        ForEach(model.roster) { a in
+                            Text("• \(a.agentId)  \(a.name)  (\(a.status))").font(.caption)
+                        }
 
-                    Text("Log").font(.headline)
-                    ForEach(model.logs.prefix(40), id: \.self) { line in
-                        Text(line).font(.caption.monospaced())
+                        Text("Protocol · hot path").font(.subheadline.weight(.semibold))
+                        HStack {
+                            Button("subscribe") { model.subscribe() }
+                            Button("unsubscribe") { model.unsubscribe() }
+                            Button("transcriptTail") { model.refreshTranscript() }
+                        }
+
+                        Text("Connection").font(.subheadline.weight(.semibold))
+                        Text("capabilities: \(model.capabilities.isEmpty ? "—" : model.capabilities)")
+                            .font(.caption.monospaced())
+                        Text("connection_id: \(model.connectionId)")
+                            .font(.caption.monospaced())
+                        Text("Redirect: \(MOBILE_REDIRECT_URI) · no WebView primary")
+                            .font(.caption2)
+
+                        Text("Desktop · upload").font(.subheadline.weight(.semibold))
+                        Text("未接线（MU1 占位）— 不砍未来 VNC/upload 约定；PC U1 已有产品入口。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Text("Log").font(.subheadline.weight(.semibold))
+                        ForEach(model.logs.prefix(40), id: \.self) { line in
+                            Text(line).font(.caption.monospaced())
+                        }
+                    } label: {
+                        Text("更多 / 调试")
+                            .font(.subheadline.weight(.semibold))
                     }
                 }
                 .padding()
@@ -85,17 +150,24 @@ struct ContentView: View {
                 // URL Types backup for atlasbot://auth/callback (ASWebAuthenticationSession is primary).
                 model.handleOpenURL(url)
             }
+            .onChange(of: model.debugOpen) { open in
+                UserDefaults.standard.set(open, forKey: BotViewModel.debugPrefsKey)
+            } // iOS 16 single-parameter onChange
         }
     }
 }
 
 @MainActor
 final class BotViewModel: ObservableObject, HubClientDelegate {
+    static let debugPrefsKey = "atlas_bot_mu1_debug_open"
+
     @Published var hubUrl = DEFAULT_HUB_WS
     @Published var oidcIssuer = "http://127.0.0.1:8090"
+    @Published var bearerPaste = ""
     @Published var state: ConnState = .disconnected
     @Published var stateDetail: String?
     @Published var capabilities = ""
+    @Published var connectionId = "—"
     @Published var authStatus = AuthSession.shared.hasTicket() ? "auth: ticket stored" : "auth: no ticket (dev OK)"
     @Published var runState = "—"
     @Published var selectedAgent = "agt_1"
@@ -103,14 +175,23 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     @Published var transcript = ""
     @Published var lastError: String?
     @Published var roster: [RosterEntry] = []
+    @Published var conversation: [String] = []
     @Published var logs: [String] = []
+    @Published var advancedOpen = false
+    @Published var debugOpen = UserDefaults.standard.bool(forKey: BotViewModel.debugPrefsKey)
+    @Published var subscribedAgents: Set<String> = []
 
     private lazy var client: HubClient = HubClient(url: hubUrl, delegate: self)
-    private let auth = AuthSession.shared
+    private let authSession = AuthSession.shared
 
     private func appendLog(_ line: String) {
         logs.insert(line, at: 0)
         if logs.count > 200 { logs.removeLast() }
+    }
+
+    private func appendConversation(_ line: String) {
+        conversation.append(line)
+        if conversation.count > 300 { conversation.removeFirst() }
     }
 
     private func showErr(_ err: DisplayError) {
@@ -124,11 +205,15 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     func connect() {
         lastError = nil
         client.setUrl(hubUrl.trimmingCharacters(in: .whitespacesAndNewlines))
-        client.setAuthorization(auth.currentBearer())
+        let pasted = bearerPaste.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bearer = authSession.currentBearer() ?? (pasted.isEmpty ? nil : pasted)
+        client.setAuthorization(bearer)
         client.connect { [weak self] result in
             Task { @MainActor in
                 switch result {
-                case .success(let ack): self?.appendLog("ready \(ack.connectionId) user=\(ack.userId)")
+                case .success(let ack):
+                    self?.appendLog("ready \(ack.connectionId) user=\(ack.userId)")
+                    self?.fetchRoster(auto: true)
                 case .failure(let err): self?.showErr(err)
                 }
             }
@@ -146,7 +231,7 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
         }
         appendLog("login → ASWebAuthenticationSession PKCE (\(MOBILE_REDIRECT_URI))")
         let cfg = OidcClientConfig(issuer: issuer, clientId: DEFAULT_IOS_CLIENT_ID)
-        auth.startLogin(cfg: cfg) { [weak self] result in
+        authSession.startLogin(cfg: cfg) { [weak self] result in
             Task { @MainActor in
                 switch result {
                 case .success:
@@ -161,7 +246,7 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     }
 
     func logout() {
-        auth.logout()
+        authSession.logout()
         client.setAuthorization(nil)
         client.disconnect()
         authStatus = "auth: logged out"
@@ -169,7 +254,7 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     }
 
     func handleOpenURL(_ url: URL) {
-        auth.handleCallbackURL(url) { [weak self] result in
+        authSession.handleCallbackURL(url) { [weak self] result in
             Task { @MainActor in
                 switch result {
                 case .success:
@@ -195,25 +280,37 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
         }
     }
 
-    func fetchRoster() {
+    func fetchRoster(auto: Bool = false) {
         client.roster { [weak self] result in
             Task { @MainActor in
                 switch result {
                 case .success(let agents):
                     self?.roster = agents
-                    self?.appendLog("roster \(agents.count) agents")
-                case .failure(let e): self?.showErr(e)
+                    if let first = agents.first {
+                        let keep = agents.contains(where: { $0.agentId == self?.selectedAgent })
+                        if !keep { self?.selectedAgent = first.agentId }
+                    }
+                    self?.appendLog(auto ? "roster \(agents.count) agents (auto)" : "roster \(agents.count) agents")
+                case .failure(let e):
+                    if auto {
+                        self?.appendLog("roster after connect failed (non-fatal): \(e.message)")
+                    } else {
+                        self?.showErr(e)
+                    }
                 }
             }
         }
     }
 
-    func subscribe() {
+    func subscribe(then: (() -> Void)? = nil) {
         let id = selectedAgent.trimmingCharacters(in: .whitespacesAndNewlines)
         client.subscribe(agentIds: [id]) { [weak self] result in
             Task { @MainActor in
                 switch result {
-                case .success: self?.appendLog("subscribed \(id)")
+                case .success:
+                    self?.subscribedAgents.insert(id)
+                    self?.appendLog("subscribed \(id)")
+                    then?()
                 case .failure(let e): self?.showErr(e)
                 }
             }
@@ -225,7 +322,9 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
         client.unsubscribe(agentIds: [id]) { [weak self] result in
             Task { @MainActor in
                 switch result {
-                case .success: self?.appendLog("unsubscribed \(id)")
+                case .success:
+                    self?.subscribedAgents.remove(id)
+                    self?.appendLog("unsubscribed \(id)")
                 case .failure(let e): self?.showErr(e)
                 }
             }
@@ -234,13 +333,27 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
 
     func sendPrompt() {
         let id = selectedAgent.trimmingCharacters(in: .whitespacesAndNewlines)
-        client.sendPrompt(agentId: id, prompt: prompt, immediate: true) { [weak self] result in
-            Task { @MainActor in
-                switch result {
-                case .success: self?.appendLog("sendPrompt ok")
-                case .failure(let e): self?.showErr(e)
+        guard !id.isEmpty else {
+            lastError = "agentId required"
+            return
+        }
+        let doSend: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.client.sendPrompt(agentId: id, prompt: self.prompt, immediate: true) { [weak self] result in
+                Task { @MainActor in
+                    switch result {
+                    case .success:
+                        self?.appendConversation("you: \(self?.prompt ?? "")")
+                        self?.appendLog("sendPrompt ok")
+                    case .failure(let e): self?.showErr(e)
+                    }
                 }
             }
+        }
+        if !subscribedAgents.contains(id) {
+            subscribe(then: doSend)
+        } else {
+            doSend()
         }
     }
 
@@ -250,7 +363,9 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
             Task { @MainActor in
                 switch result {
                 case .success(let r):
-                    self?.transcript = "\(r ?? "(empty)")"
+                    let text = "\(r ?? "(empty)")"
+                    self?.transcript = text
+                    self?.appendConversation("— transcript —\n\(text)")
                     self?.appendLog("transcriptTail refreshed")
                 case .failure(let e): self?.showErr(e)
                 }
@@ -264,6 +379,10 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
         Task { @MainActor in
             self.state = state
             self.stateDetail = detail
+            if state == .disconnected {
+                self.subscribedAgents = []
+                self.connectionId = "—"
+            }
         }
     }
 
@@ -276,18 +395,35 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     nonisolated func hubClient(_ client: HubClient, didHelloAck ack: HelloAck) {
         Task { @MainActor in
             self.capabilities = ack.capabilities.joined(separator: ", ")
+            self.connectionId = ack.connectionId
             self.appendLog("hello_ack conn=\(ack.connectionId) user=\(ack.userId)")
         }
     }
 
     nonisolated func hubClient(_ client: HubClient, didReceiveEvent event: BotEventEnvelope) {
         Task { @MainActor in
-            self.appendLog("event \(event.channel) agent=\(event.agentId) seq=\(event.seq)")
+            let line = "event \(event.channel) agent=\(event.agentId) seq=\(event.seq)"
+            self.appendLog(line)
+            self.appendConversation(line)
             if event.channel == "hub:resync_required" {
                 self.lastError = "hub:resync_required — re-fetch transcript"
             }
             if event.channel == "hub:turn_finished" {
-                self.appendLog("turn_finished — tap transcriptTail to refresh")
+                self.appendLog("turn_finished — refreshing transcript")
+                let aid = event.agentId.isEmpty ? self.selectedAgent : event.agentId
+                self.selectedAgent = self.selectedAgent // keep
+                self.client.getAgentTranscriptTail(agentId: aid) { [weak self] result in
+                    Task { @MainActor in
+                        switch result {
+                        case .success(let r):
+                            let text = "\(r ?? "(empty)")"
+                            self?.transcript = text
+                            self?.appendConversation("— transcript —\n\(text)")
+                            self?.appendLog("transcriptTail refreshed")
+                        case .failure(let e): self?.showErr(e)
+                        }
+                    }
+                }
             }
         }
     }
