@@ -20,7 +20,8 @@ Private Grok Bot stack (Bot-Relay): `bot_client` ↔ Computer Hub ↔ Box gatewa
 | `crates/atlas-bot-cli` | P6 β′ thin Bot-Relay CLI (`bot_client` → Hub WS; ≠ ACP) |
 | `crates/atlas-acp-adapter` | α minimal ACP subset adapter (`:8790` → Hub bot_client) |
 | `clients/pc/` | PC bot_client (Tauri 2 + TS) |
-| `docs/cli-primary-runbook.md` | **Recommended CLI primary path** |
+| `docs/cli-primary-runbook.md` | **Recommended CLI primary path** (dev) |
+| `docs/packaging-skeleton.md` | P1 dist/install/start skeleton (not store) |
 | `docs/P1-runbook.md` … `docs/P6-*.md` / `runtime-boundary-runbook.md` | Phase + R1 runbooks |
 | `docs/SOURCE_REV.md` | Upstream pin |
 
@@ -36,6 +37,17 @@ ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.s
 
 Then PC Connect → Send. Full guide: [`docs/cli-primary-runbook.md`](./docs/cli-primary-runbook.md).
 Stub / box / openai are **side paths** (see runbook table).
+
+## Packaging skeleton (P1 · not a store release)
+
+Local `dist/` layout + install/start scripts: [`docs/packaging-skeleton.md`](./docs/packaging-skeleton.md).
+
+```bash
+./scripts/pack-dist.sh && ./scripts/install-local.sh
+# then: ~/atlas-bot/scripts/start-cli-stack.sh  +  open ~/atlas-bot/pc/atlas-bot-pc
+```
+
+**Not** store listing / notarization / WeCom tickets / MSI. Unsigned yellow prompts OK. Does **not** change `bot.*`. Does **not** ship external `agent`. Dev path remains `scripts/dev-cli-stack.*` + `cargo run`.
 
 ## Quick check
 
@@ -53,4 +65,4 @@ P5 VNC/attachments: see [`docs/P5-runbook.md`](./docs/P5-runbook.md).
 
 ## Out of scope (P5)
 
-Real noVNC cluster, IdP, groups/channels, `readAttachment*`, production installers, vendor grok runtime.
+Real noVNC cluster, IdP, groups/channels, `readAttachment*`, production/store installers (P1 is dist+scripts skeleton only — see packaging-skeleton), vendor grok runtime.
