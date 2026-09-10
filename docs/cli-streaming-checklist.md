@@ -37,8 +37,10 @@ cargo test -p atlas-bot-hub --test cli_stream_smoke -- --nocapture --test-thread
 分进程起栈流式证据以 **本机 PowerShell** 为准（无强制 Win CI runner）：
 
 - 配方：[`cli-primary-runbook.md`](./cli-primary-runbook.md) § Windows / §5b PowerShell  
-- 勾选：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md) **W-S1 / W-S2 / W-S3**  
-- 一键：`$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1 -Stream`
+- 勾选（mock）：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md) **W-S1 / W-S2 / W-S3**  
+- 勾选（**真机** L1）：[`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md) · windows **W-L2**  
+- 一键 mock：`$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1 -Stream`  
+- 一键真机：`.\scripts\dev-cli-stack.ps1 -Stream`（先清 mock env；见 live checklist 切换表）
 
 **CI 注：** `cli_stream_smoke`（及 `p35_smoke` / `b1_smoke`）仍以 **Unix CI** 为主；不把 Win runner 当合入门禁。同进程 B2 冒烟 **不能**替代「本机 ps1 起栈」分进程 B1 手测。
 
@@ -46,5 +48,6 @@ cargo test -p atlas-bot-hub --test cli_stream_smoke -- --nocapture --test-thread
 
 - 主路径：[`cli-primary-runbook.md`](./cli-primary-runbook.md)  
 - Win 起栈 / 流式：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
+- 真机联调包（L1）：[`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md)  
 - B1：[`b1-event-ingest-runbook.md`](./b1-event-ingest-runbook.md)  
 - 回归：`p35_smoke` · `cli_stream_smoke`（Unix CI）· `b1_smoke`

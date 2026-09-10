@@ -63,7 +63,7 @@ $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"
 
 **`-Stream` / `ATLAS_CLI_STACK_STREAM=1`（WS1·B）：** 仅填 **未设** 的默认——`ATLAS_AGENT_CLI_STREAM=1`、分进程 `ATLAS_HUB_EVENT_URL=http://127.0.0.1:7701/internal/runtime-hint`、无 token 时 `ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK=1`、若 CLI 为 mock `.cmd` 则 `MOCK_CLI_STREAM=1`。已设的 STREAM / EVENT_URL / MOCK / TOKEN / INSECURE **不被无声覆盖**。无 `-Stream`：仍为 text 起栈（与 W1 一致）。分进程 mid-turn **只走 B1**，勿与 B2 双开。横幅会打印 STREAM / EVENT_URL / token|insecure / MOCK_CLI_*。
 
-手测勾选见 [`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)（含 W-S1..W-S3 流式位）。
+手测勾选见 [`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)（含 W-S1..W-S3 流式位；真机 W-L* → [`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md)）。
 
 #### 附录：手动双终端（bat）
 
@@ -131,7 +131,8 @@ cd clients/pc && npm i && npm run tauri dev
   - Windows：`$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"`  
   回复形如 `atlas-mock-reply agent=…`（**非** `echo:` stub）。  
   - 流式：`MOCK_CLI_STREAM=1`（可选 `MOCK_CLI_SLEEP_MS`）打 NDJSON delta + `result`。  
-- 证据步骤见 [`cli-primary-checklist.md`](./cli-primary-checklist.md)；流式见 [`cli-streaming-checklist.md`](./cli-streaming-checklist.md)。
+- 证据步骤见 [`cli-primary-checklist.md`](./cli-primary-checklist.md)；流式见 [`cli-streaming-checklist.md`](./cli-streaming-checklist.md)。  
+- **真机联调包（L1）：** Win 已登录 agent 手测 + 失败对照 + mock↔真机切换 → [`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md)；探针 `scripts/probe-agent-cli.ps1`（L1b）。
 
 ---
 
@@ -171,7 +172,7 @@ mock 行格式：**Cursor 形 NDJSON**（`assistant` + `result`）；gateway **�
 **规则与 B1 相同：勿同开 B2 `spawn_turn_bridge` + B1 POST**（Hub 对 `turn_finished` 有去重，但 mid-turn 会双发）。  
 分进程栈（`dev-cli-stack.*`）**只** B1；**不要** B2+B1 双开。
 
-手测勾选：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md) · Win：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md) W-S*。
+手测勾选：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md) · Win mock：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md) W-S* · **真机：** [`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md)（W-L*）。
 
 ### PowerShell 流式起栈（WS1·B）
 
@@ -193,7 +194,8 @@ $env:MOCK_CLI_STREAM='1'
 .\scripts\dev-cli-stack.ps1 -Stream
 ```
 
-PC：Connect → `ws://127.0.0.1:7700/ws` → Send → Events ≥1× `hub:assistant_delta` → `hub:turn_finished`；preview 含 `atlas-mock-reply`（非 `echo:`）。  
+PC（**mock**）：Connect → `ws://127.0.0.1:7700/ws` → Send → Events ≥1× `hub:assistant_delta` → `hub:turn_finished`；preview 含 `atlas-mock-reply`（非 `echo:`）。  
+PC（**真机**）：同 Connect/Send；preview **非** `echo:` / **非** `atlas-mock-reply`；步骤与失败表见 [`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md)。  
 mock `.cmd` 的 `MOCK_CLI_SLEEP_MS` 经 `timeout` 近似，**秒级粒度**（见 windows checklist §7）。
 
 
@@ -254,6 +256,7 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 
 - Checklist / E1 mock：[`cli-primary-checklist.md`](./cli-primary-checklist.md)  
 - Windows 起栈：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
+- 真机联调包（L1）：[`live-agent-handtest-checklist.md`](./live-agent-handtest-checklist.md)  
 - PC 使用说明：[`pc-user-guide.md`](./pc-user-guide.md)  
 - P3.5 细节：[`P3.5-runbook.md`](./P3.5-runbook.md)  
 - CLI 流式：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md)  
