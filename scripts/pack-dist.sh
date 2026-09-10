@@ -59,6 +59,17 @@ cp -f "$TEMPLATE/README-INSTALL.md" "$DIST/README-INSTALL.md"
 cp -f "$TEMPLATE/scripts/start-cli-stack.sh" "$DIST/scripts/start-cli-stack.sh"
 cp -f "$TEMPLATE/scripts/start-cli-stack.ps1" "$DIST/scripts/start-cli-stack.ps1"
 chmod +x "$DIST/scripts/start-cli-stack.sh"
+# T1 entry helpers (also kept under scripts/ for repo-side install-local)
+for helper in install-desktop-entry.sh install-shortcuts.ps1; do
+  if [[ -f "$ROOT/scripts/$helper" ]]; then
+    cp -f "$ROOT/scripts/$helper" "$DIST/scripts/$helper"
+  elif [[ -f "$TEMPLATE/scripts/$helper" ]]; then
+    cp -f "$TEMPLATE/scripts/$helper" "$DIST/scripts/$helper"
+  fi
+done
+if [[ -f "$DIST/scripts/install-desktop-entry.sh" ]]; then
+  chmod +x "$DIST/scripts/install-desktop-entry.sh"
+fi
 
 if [[ "$SKIP_PC" -eq 0 ]]; then
   echo "==> PC: tauri build --no-bundle (unsigned executable; NOT store / NOT MSI)"
@@ -94,4 +105,6 @@ echo
 echo "Pack complete. Tree:"
 find "$DIST" -maxdepth 3 \( -type f -o -type d \) | sort
 echo
-echo "Next: ./scripts/install-local.sh   OR   run dist/scripts/start-cli-stack.sh from this tree"
+echo "Next: ./scripts/archive-dist.sh   # portable tar.gz/zip from dist/"
+echo "      ./scripts/install-local.sh  # copy + .desktop entries"
+echo "      OR run dist/scripts/start-cli-stack.sh from this tree"
