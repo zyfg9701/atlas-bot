@@ -46,13 +46,24 @@ ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.s
 # 若 ExecutionPolicy 拦截：
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-cli-stack.ps1
 
-# 无真 agent：用 mock .cmd（纯 Win，无需 Git Bash）
+# 无真 agent：用 mock .cmd（纯 Win，无需 Git Bash）— text 起栈（W1）
 $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1
+
+# WS1·B 流式一键（-Stream）：默认 STREAM=1 + 分进程 EVENT_URL + mock 时 MOCK_CLI_STREAM=1
+# Hub 侧默认 insecure loopback（或你已设的共享 token）；显式 env 不被覆盖
+$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1 -Stream
+
+# 等价：环境开关（无 -Stream 参数时）
+$env:ATLAS_CLI_STACK_STREAM='1'
+$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"
+.\scripts\dev-cli-stack.ps1
 ```
 
 `dev-cli-stack.ps1` 与 Unix `.sh` **语义对等**：探测 `ATLAS_AGENT_CLI`（`Get-Command` / 路径，含 `.exe`/`.cmd`）→ 找不到 **exit 1** 且不静默 stub → 起 gateway `BACKEND=cli` + Hub `ATLAS_GATEWAY_URL`（Hub 侧 `ATLAS_GATEWAY_HTTP_BIND=off`）→ 打印 `ws://127.0.0.1:7700/ws` 与 healthz → Ctrl-C 清 PID（`.cli-stack-pids/`）与日志（`.cli-stack-logs/`）。
 
-手测勾选见 [`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)。
+**`-Stream` / `ATLAS_CLI_STACK_STREAM=1`（WS1·B）：** 仅填 **未设** 的默认——`ATLAS_AGENT_CLI_STREAM=1`、分进程 `ATLAS_HUB_EVENT_URL=http://127.0.0.1:7701/internal/runtime-hint`、无 token 时 `ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK=1`、若 CLI 为 mock `.cmd` 则 `MOCK_CLI_STREAM=1`。已设的 STREAM / EVENT_URL / MOCK / TOKEN / INSECURE **不被无声覆盖**。无 `-Stream`：仍为 text 起栈（与 W1 一致）。分进程 mid-turn **只走 B1**，勿与 B2 双开。横幅会打印 STREAM / EVENT_URL / token|insecure / MOCK_CLI_*。
+
+手测勾选见 [`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)（含 W-S1..W-S3 流式位）。
 
 #### 附录：手动双终端（bat）
 
@@ -157,9 +168,33 @@ mock 行格式：**Cursor 形 NDJSON**（`assistant` + `result`）；gateway **�
 ### 分进程 B1（CS1b）
 
 设 `ATLAS_HUB_EVENT_URL=http://127.0.0.1:7701/internal/runtime-hint`（见 [`b1-event-ingest-runbook.md`](./b1-event-ingest-runbook.md)）。  
-**规则与 B1 相同：勿同开 B2 `spawn_turn_bridge` + B1 POST**（Hub 对 `turn_finished` 有去重，但 mid-turn 会双发）。
+**规则与 B1 相同：勿同开 B2 `spawn_turn_bridge` + B1 POST**（Hub 对 `turn_finished` 有去重，但 mid-turn 会双发）。  
+分进程栈（`dev-cli-stack.*`）**只** B1；**不要** B2+B1 双开。
 
-手测勾选：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md)。
+手测勾选：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md) · Win：[`windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md) W-S*。
+
+### PowerShell 流式起栈（WS1·B）
+
+```powershell
+# 一键 -Stream + mock .cmd（推荐手测）
+$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"
+.\scripts\dev-cli-stack.ps1 -Stream
+# 横幅应见 STREAM=1、EVENT_URL=…/internal/runtime-hint、MOCK_CLI_STREAM=1、INSECURE=1（或你设的 token）
+
+# 显式 env 备选（不依赖 -Stream；显式值优先，-Stream 不会覆盖）
+$env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"
+$env:ATLAS_AGENT_CLI_STREAM='1'
+$env:ATLAS_HUB_EVENT_URL='http://127.0.0.1:7701/internal/runtime-hint'
+$env:ATLAS_HUB_EVENT_ALLOW_INSECURE_LOOPBACK='1'   # 或改用共享 ATLAS_HUB_EVENT_TOKEN
+$env:MOCK_CLI_STREAM='1'
+.\scripts\dev-cli-stack.ps1
+
+# 真机 agent + -Stream（无 mock → 不自动 MOCK_CLI_STREAM）
+.\scripts\dev-cli-stack.ps1 -Stream
+```
+
+PC：Connect → `ws://127.0.0.1:7700/ws` → Send → Events ≥1× `hub:assistant_delta` → `hub:turn_finished`；preview 含 `atlas-mock-reply`（非 `echo:`）。  
+mock `.cmd` 的 `MOCK_CLI_SLEEP_MS` 经 `timeout` 近似，**秒级粒度**（见 windows checklist §7）。
 
 
 ---
@@ -210,7 +245,8 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 6. Hub **默认仍可无 URL 起 stub**（不破坏单测）；改体验靠文档 + 脚本 + warn，**不**强制远程 gateway。  
 7. 未改 `bot.*`；未做 Box LLM / I2.2。  
 8. **W1 Windows：** PowerShell **5.1+**（亦支持 7+）；mock **已交** `tools/mock-cli/mock-atlas-agent-cli.cmd`（纯 cmd；Git Bash `.sh` 仍可用作备选）；PID 清理 = `.cli-stack-pids/*.pid` + `Stop-Process`（Ctrl-C / `finally`）；与 sh 的已知差异：healthz 用 `Invoke-WebRequest`（回退 `curl.exe`），mock `.cmd` 的 `chars=` 为纯长度（无 `cksum` hash）。  
-9. **CS1 流式：** 默认 **text**；`ATLAS_AGENT_CLI_STREAM=1` opt-in（见 §5b / [`cli-streaming-checklist.md`](./cli-streaming-checklist.md) §7）。未做假流式；未改 `bot.*`。
+9. **CS1 流式：** 默认 **text**；`ATLAS_AGENT_CLI_STREAM=1` opt-in（见 §5b / [`cli-streaming-checklist.md`](./cli-streaming-checklist.md) §7）。未做假流式；未改 `bot.*`。  
+10. **WS1·B Win 流式起法：** `-Stream` 或 `ATLAS_CLI_STACK_STREAM=1` 填未设默认（STREAM / EVENT_URL / insecure-or-token / mock 时 MOCK）；显式 env 优先；无开关 = text。Unix `.sh` **不**默认 STREAM（仅横幅/注释对齐）。分进程 mid-turn **仅 B1**。无 Win CI runner（WS2）。
 
 ---
 
