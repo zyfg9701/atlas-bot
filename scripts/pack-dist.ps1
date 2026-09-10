@@ -47,6 +47,16 @@ foreach ($name in $packages) {
 Copy-Item -LiteralPath (Join-Path $Template 'README-INSTALL.md') -Destination (Join-Path $Dist 'README-INSTALL.md') -Force
 Copy-Item -LiteralPath (Join-Path $Template 'scripts\start-cli-stack.sh') -Destination (Join-Path $Dist 'scripts') -Force
 Copy-Item -LiteralPath (Join-Path $Template 'scripts\start-cli-stack.ps1') -Destination (Join-Path $Dist 'scripts') -Force
+# T1 entry helpers
+foreach ($helper in @('install-desktop-entry.sh', 'install-shortcuts.ps1')) {
+  $fromRepo = Join-Path $Root "scripts\$helper"
+  $fromTpl = Join-Path $Template "scripts\$helper"
+  if (Test-Path -LiteralPath $fromRepo) {
+    Copy-Item -LiteralPath $fromRepo -Destination (Join-Path $Dist 'scripts') -Force
+  } elseif (Test-Path -LiteralPath $fromTpl) {
+    Copy-Item -LiteralPath $fromTpl -Destination (Join-Path $Dist 'scripts') -Force
+  }
+}
 
 if (-not $SkipPc) {
   Write-Host '==> PC: tauri build --no-bundle (unsigned; NOT store / NOT MSI/NSIS)'
@@ -80,4 +90,7 @@ Write-Host ''
 Write-Host 'Pack complete. Tree:'
 Get-ChildItem -LiteralPath $Dist -Recurse -File | ForEach-Object { $_.FullName.Substring($Root.Length + 1) }
 Write-Host ''
-Write-Host 'Next: .\scripts\install-local.ps1   OR   .\dist\scripts\start-cli-stack.ps1'
+Write-Host 'Next: .\scripts\archive-dist.ps1   # portable zip from dist\'
+Write-Host '      .\scripts\install-local.ps1  # copy + Start Menu shortcuts'
+Write-Host '      OR .\dist\scripts\start-cli-stack.ps1'
+
