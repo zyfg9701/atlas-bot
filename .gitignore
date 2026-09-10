@@ -11,3 +11,6 @@ clients/pc/src-tauri/gen/
 # local cli-stack script state
 .cli-stack-pids/
 .cli-stack-logs/
+
+# P1 packaging skeleton — generated pack tree (sources in packaging/templates/)
+/dist/

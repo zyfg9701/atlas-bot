@@ -4,6 +4,9 @@
 > 基线：P3.5 `CliAgentGateway` · 打磨 C1/C1b  
 > 旁路（stub / box / openai）见下文对照表；协议细节仍见 [`P3.5-runbook.md`](./P3.5-runbook.md)。
 
+
+> **Dev vs dist:** 开发用仓库内 `cargo run` / `scripts/dev-cli-stack.*`；分发用 `dist/` 二进制 + `dist/scripts/start-cli-stack.*`（见 [`packaging-skeleton.md`](./packaging-skeleton.md)）。本页默认描述 **开发主路径**。
+
 ---
 
 ## 1. 拓扑
@@ -17,6 +20,7 @@ PC (bot_client) ──WS──► Hub (:7700) ──HTTP──► atlas-bot-gate
 产品叙事：**对话 = 本机 Atlas/Cursor agent**。PC **只连 Hub**；不在 PC 内起 gateway。
 
 ---
+
 
 ## 2. 一键脚本
 
@@ -240,7 +244,7 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 ## 8. 已知限制（C1 + W1 填实）
 
 1. **默认 `ATLAS_AGENT_CLI`：** 名 `agent`；探测 = `command -v` / `Get-Command` / 可执行路径存在（脚本）+ gateway `resolve_agent_cli_found`（PATH 或文件）。  
-2. **真机登录：** 依赖 Cursor/Atlas 本机已登录；本仓不打包安装器。  
+2. **真机登录：** 依赖 Cursor/Atlas 本机已登录；本仓不打包外置 `agent`。P1 有 `dist/`+install 骨架（非商店/非签名）见 [`packaging-skeleton.md`](./packaging-skeleton.md)。  
 3. **脚本平台：** Unix `scripts/dev-cli-stack.sh` + Windows `scripts/dev-cli-stack.ps1`（**语义对等**）；手动 bat 仅附录。  
 4. **C1b Hub warn：** **已做**（unset `ATLAS_GATEWAY_URL` → `warn!` + 指本 runbook）。  
 5. **PC loopback healthz：** **已做**（调试区探 `http://127.0.0.1:8787/healthz`，失败友好；「复制起栈命令」双行 sh + ps1）。  
@@ -260,4 +264,5 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 - PC 使用说明：[`pc-user-guide.md`](./pc-user-guide.md)  
 - P3.5 细节：[`P3.5-runbook.md`](./P3.5-runbook.md)  
 - CLI 流式：[`cli-streaming-checklist.md`](./cli-streaming-checklist.md)  
+- 分发雏形（dist/install）：[`packaging-skeleton.md`](./packaging-skeleton.md)  
 - B1 ingest：[`b1-event-ingest-runbook.md`](./b1-event-ingest-runbook.md)
