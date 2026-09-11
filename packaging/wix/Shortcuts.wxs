@@ -1,0 +1,65 @@
+<!--
+  Start Menu + optional Desktop shortcuts via WiX Shortcut elements.
+  Strategy: W-内建 (NOT Custom Action → install-shortcuts.ps1) — forbids double .lnk.
+  Semantics align T1 install-shortcuts.ps1:
+    Programs\atlas-bot\atlas-bot PC.lnk → pc\atlas-bot-pc.exe ; WD = install root
+    Programs\atlas-bot\atlas-bot Start CLI Stack.lnk → powershell -NoProfile -ExecutionPolicy Bypass -File …\scripts\start-cli-stack.ps1
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <ComponentGroup Id="StartMenuShortcutComponents">
+      <Component Id="StartMenuShortcuts" Directory="ApplicationProgramsFolder" Guid="9BB56198-8528-4D08-AEE3-968131B17EEC">
+        <Shortcut
+          Id="ShortcutPc"
+          Name="atlas-bot PC"
+          Description="atlas-bot PC shell (unsigned)"
+          Target="[PCFOLDER]atlas-bot-pc.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="AtlasBotIcon"
+          IconIndex="0" />
+        <Shortcut
+          Id="ShortcutStartCliStack"
+          Name="atlas-bot Start CLI Stack"
+          Description="Start atlas-bot Hub+gateway (cli backend; binaries only — no cargo run)"
+          Target="[WindowsFolder]System32\WindowsPowerShell\v1.0\powershell.exe"
+          Arguments="-NoProfile -ExecutionPolicy Bypass -File &quot;[SCRIPTSFOLDER]start-cli-stack.ps1&quot;"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\atlas-bot"
+          Name="StartMenuShortcuts"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="DesktopShortcutComponents">
+      <Component Id="DesktopShortcutComp" Directory="DesktopFolder" Guid="4D228B8D-4C1B-4EB0-9424-F9EA1C9B1AB1">
+        <Shortcut
+          Id="DesktopShortcutPc"
+          Name="atlas-bot PC"
+          Description="atlas-bot PC shell (unsigned)"
+          Target="[PCFOLDER]atlas-bot-pc.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="AtlasBotIcon"
+          IconIndex="0" />
+        <Shortcut
+          Id="DesktopShortcutStartCliStack"
+          Name="atlas-bot Start CLI Stack"
+          Description="Start atlas-bot Hub+gateway (cli backend)"
+          Target="[WindowsFolder]System32\WindowsPowerShell\v1.0\powershell.exe"
+          Arguments="-NoProfile -ExecutionPolicy Bypass -File &quot;[SCRIPTSFOLDER]start-cli-stack.ps1&quot;"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\atlas-bot"
+          Name="DesktopShortcuts"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

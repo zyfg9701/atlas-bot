@@ -1,0 +1,25 @@
+<!--
+  File harvest for dist\ tree (WiX v4 Files element).
+  Bind paths set by build-msi.ps1 via `wix build -b DistBin=… -b DistPc=… -b DistScripts=… -b DistRoot=…`
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <ComponentGroup Id="BinComponents" Directory="BINFOLDER">
+      <!-- hub + gateway + cli (required by build-msi; no external agent) -->
+      <Files Include="!(bindpath.DistBin)\*.exe" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="PcComponents" Directory="PCFOLDER">
+      <Files Include="!(bindpath.DistPc)\atlas-bot-pc.exe" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="ScriptsComponents" Directory="SCRIPTSFOLDER">
+      <!-- start-cli-stack + T1 helpers (shortcuts themselves come from WiX Shortcut, not these scripts) -->
+      <Files Include="!(bindpath.DistScripts)\*" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="RootDocComponents" Directory="INSTALLFOLDER">
+      <Files Include="!(bindpath.DistRoot)\README-INSTALL.md" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

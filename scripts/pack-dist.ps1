@@ -59,7 +59,7 @@ foreach ($helper in @('install-desktop-entry.sh', 'install-shortcuts.ps1')) {
 }
 
 if (-not $SkipPc) {
-  Write-Host '==> PC: tauri build --no-bundle (unsigned; NOT store / NOT MSI/NSIS)'
+  Write-Host '==> PC: tauri build --no-bundle (unsigned; NOT store; T2 MSI is external WiX via build-msi.ps1)'
   $pcDir = Join-Path $Root 'clients\pc'
   if (-not (Test-Path -LiteralPath (Join-Path $pcDir 'node_modules'))) {
     Push-Location -LiteralPath $pcDir

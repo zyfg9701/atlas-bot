@@ -1,0 +1,78 @@
+<!--
+  atlas-bot T2·W / MSI1 — WiX v4 package definition
+  ==================================================
+  Toolchain: WiX Toolset **v4** (`wix build`). Do not mix with v3 candle/light.
+  Build:     .\scripts\build-msi.ps1  (requires existing dist\ from pack-dist.ps1)
+  UpgradeCode (FIXED — do not regenerate): DAB90D5E-C3DB-405C-9024-769247FFC85F
+  Scope:     perUser → %LOCALAPPDATA%\atlas-bot  (INSTALLFOLDER)
+  Shortcuts: WiX Shortcut elements only (NOT install-shortcuts.ps1 — avoid double .lnk)
+  Desktop:   Feature DesktopShortcuts Level=2 (default off; INSTALLLEVEL=1)
+  Still not: store / Authenticode / Program Files / admin / external agent
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="atlas-bot"
+    Manufacturer="atlas-bot"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="DAB90D5E-C3DB-405C-9024-769247FFC85F"
+    Scope="perUser"
+    Language="1033">
+
+    <SummaryInformation
+      Description="atlas-bot Hub + gateway + PC (unsigned; not store)"
+      Manufacturer="atlas-bot" />
+
+    <!-- Same UpgradeCode forever; bump ProductVersion on release (ProductCode regenerates). -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of atlas-bot is already installed. Remove it first if you need to install this older build."
+      Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Default feature level = 1 → Features with Level &gt; 1 are off unless selected -->
+    <Property Id="INSTALLLEVEL" Value="1" />
+
+    <!-- ARP / Apps &amp; Features -->
+    <Property Id="ARPHELPLINK" Value="https://github.com/zyfg9701/atlas-bot" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/zyfg9701/atlas-bot" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- Install root: %LOCALAPPDATA%\atlas-bot (align T1 install-local) -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="atlas-bot">
+        <Directory Id="BINFOLDER" Name="bin" />
+        <Directory Id="PCFOLDER" Name="pc" />
+        <Directory Id="SCRIPTSFOLDER" Name="scripts" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="atlas-bot" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Feature Id="ProductFeature" Title="atlas-bot" Description="Hub, gateway, cli, PC shell, scripts" Level="1">
+      <ComponentGroupRef Id="BinComponents" />
+      <ComponentGroupRef Id="PcComponents" />
+      <ComponentGroupRef Id="ScriptsComponents" />
+      <ComponentGroupRef Id="RootDocComponents" />
+      <ComponentGroupRef Id="StartMenuShortcutComponents" />
+    </Feature>
+
+    <!-- Desktop shortcuts: default OFF (Level 2 &gt; INSTALLLEVEL 1).
+         Enable: msiexec /i … ADDLOCAL=ProductFeature,DesktopShortcuts -->
+    <Feature
+      Id="DesktopShortcuts"
+      Title="Desktop shortcuts"
+      Description="Optional Desktop .lnk for PC and Start CLI Stack (default off; aligns T1)"
+      Level="2"
+      AllowAbsent="yes">
+      <ComponentGroupRef Id="DesktopShortcutComponents" />
+    </Feature>
+
+    <Icon Id="AtlasBotIcon" SourceFile="$(var.PcExePath)" />
+
+  </Package>
+</Wix>

@@ -111,5 +111,5 @@ Write-Host "     or: & '$pcExe'"
 Write-Host '  3. Connect → ws://127.0.0.1:7700/ws → select agent → Send'
 Write-Host ''
 Write-Host 'Unsigned / SmartScreen yellow is OK (More info → Run anyway). Not a store package.'
-Write-Host 'T2 MSI deferred. Desktop shortcuts: re-run install-shortcuts.ps1 -Desktop'
+Write-Host 'T2 MSI: scripts/build-msi.ps1 (WiX v4). Desktop shortcuts: re-run install-shortcuts.ps1 -Desktop'
 Write-Host "See: $(Join-Path $Dest 'README-INSTALL.md')"
