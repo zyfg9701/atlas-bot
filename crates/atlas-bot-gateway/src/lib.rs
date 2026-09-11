@@ -3,7 +3,7 @@
 //! - [`InMemoryGateway`] — echo stub (default when Hub has no `ATLAS_GATEWAY_URL`)
 //! - [`CliAgentGateway`] — scheme B Cursor/Atlas Agent CLI (`-p` print mode)
 //! - [`OpenAiCompatGateway`] — optional OpenAI-compat fallback
-//! - [`BoxSidecarGateway`] — R1/R2 Box Sidecar (tools + streaming hints + VNC/attach)
+//! - [`BoxSidecarGateway`] — R1/R2/RR1 Box Sidecar (tools + optional LLM + VNC/attach)
 //!
 //! Hot commands: `listAgents`, `createAgent`, `sendPrompt`,
 //! `getAgentTranscriptTail`, `interruptAgentRun`, `uploadAttachment`,
@@ -23,9 +23,12 @@ pub mod cli_gateway;
 pub mod openai_gateway;
 
 pub use box_sidecar::{
-    BoxSidecarGateway, DEFAULT_BOX_TURN_DELAY_MS, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE,
-    ENV_HUB_EVENT_TOKEN, ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS, TOOL_TRIGGER_LIST_DIR,
-    TOOL_TRIGGER_READ_FILE, TOOL_TRIGGER_WRITE_FILE,
+    BoxLlmConfig, BoxSidecarGateway, DEFAULT_BOX_HISTORY_MAX_TURNS, DEFAULT_BOX_LLM_TIMEOUT_MS,
+    DEFAULT_BOX_TURN_DELAY_MS, ENV_BOX_HISTORY_MAX_TURNS, ENV_BOX_LLM_API_KEY,
+    ENV_BOX_LLM_BASE_URL, ENV_BOX_LLM_MODE, ENV_BOX_LLM_MODEL, ENV_BOX_LLM_TIMEOUT_MS,
+    ENV_BOX_SESSION_PERSIST, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE, ENV_HUB_EVENT_TOKEN,
+    ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS, TOOL_TRIGGER_LIST_DIR, TOOL_TRIGGER_READ_FILE,
+    TOOL_TRIGGER_WRITE_FILE,
 };
 pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_STREAM, ENV_AGENT_CLI_TIMEOUT_MS};
 pub use openai_gateway::{
@@ -1253,6 +1256,10 @@ pub struct GatewayHttpMeta {
     pub agent_cli: Option<String>,
     /// Whether the configured CLI binary resolves on disk / PATH.
     pub agent_cli_found: Option<bool>,
+    /// RR1: whether Box LLM env is active (`ATLAS_BOX_LLM_*`). Never includes the key.
+    pub llm_configured: Option<bool>,
+    /// Optional model name when LLM configured (still no key).
+    pub llm_model: Option<String>,
 }
 
 impl GatewayHttpMeta {
@@ -1261,12 +1268,20 @@ impl GatewayHttpMeta {
             backend: backend.into(),
             agent_cli: None,
             agent_cli_found: None,
+            llm_configured: None,
+            llm_model: None,
         }
     }
 
     pub fn with_cli(mut self, path: impl Into<String>, found: bool) -> Self {
         self.agent_cli = Some(path.into());
         self.agent_cli_found = Some(found);
+        self
+    }
+
+    pub fn with_llm(mut self, configured: bool, model: Option<String>) -> Self {
+        self.llm_configured = Some(configured);
+        self.llm_model = model;
         self
     }
 
@@ -1280,6 +1295,12 @@ impl GatewayHttpMeta {
         }
         if let Some(f) = self.agent_cli_found {
             m.insert("agent_cli_found".into(), json!(f));
+        }
+        if let Some(c) = self.llm_configured {
+            m.insert("llm_configured".into(), json!(c));
+        }
+        if let Some(ref model) = self.llm_model {
+            m.insert("llm_model".into(), json!(model));
         }
         Value::Object(m)
     }

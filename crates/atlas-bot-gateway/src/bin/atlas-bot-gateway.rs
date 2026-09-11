@@ -2,8 +2,8 @@
 //!
 //! Listens on loopback by default (`127.0.0.1:8787`) and exposes:
 //! - `POST /invoke` — Bot-Relay hot commands
-//! - `GET  /healthz` — JSON `{ ok, backend, agent_cli?, agent_cli_found? }`
-//! - `GET  /stats` — `{ invoke_count, backend, agent_cli?, agent_cli_found? }`
+//! - `GET  /healthz` — JSON `{ ok, backend, agent_cli?, agent_cli_found?, llm_configured? }`
+//! - `GET  /stats` — `{ invoke_count, backend, agent_cli?, agent_cli_found?, llm_configured? }`
 //!
 //! Env:
 //! - `ATLAS_GATEWAY_HTTP_BIND` — default `127.0.0.1:8787`
@@ -11,7 +11,7 @@
 //! - `ATLAS_AGENT_CLI` — CLI binary for scheme B (default `agent`)
 //! - `ATLAS_AGENT_CLI_EXTRA_ARGS` — JSON string array
 //! - `ATLAS_OPENAI_*` — when backend=`openai`
-//! - `ATLAS_BOX_WORKSPACE` / `ATLAS_BOX_TURN_DELAY_MS` — when backend=`box`
+//! - `ATLAS_BOX_WORKSPACE` / `ATLAS_BOX_TURN_DELAY_MS` / `ATLAS_BOX_LLM_*` — when backend=`box`
 //! - `ATLAS_HUB_EVENT_URL` / `ATLAS_HUB_EVENT_TOKEN` — B1 mid-turn RuntimeHint POST
 //!   to Hub loopback ingest (see docs/b1-event-ingest-runbook.md)
 //!
@@ -60,10 +60,14 @@ async fn main() {
             )
         }
         "box" | "sidecar" | "box-sidecar" => {
-            info!("backend=box (BoxSidecarGateway R1)");
+            info!("backend=box (BoxSidecarGateway R1/R2/RR1)");
+            let g = BoxSidecarGateway::from_env();
+            let llm_configured = g.llm_configured();
+            let llm_model = g.llm_model().map(|s| s.to_string());
+            info!(llm_configured, llm_model = ?llm_model, "box sidecar ready");
             (
-                Arc::new(BoxSidecarGateway::from_env()),
-                GatewayHttpMeta::for_backend("box"),
+                Arc::new(g),
+                GatewayHttpMeta::for_backend("box").with_llm(llm_configured, llm_model),
             )
         }
         "cli" | _ => {

@@ -1,11 +1,18 @@
-//! R1/R2 Box Sidecar: long-lived in-process runtime behind Gateway HTTP.
+//! R1/R2/RR1 Box Sidecar: long-lived in-process runtime behind Gateway HTTP.
 //!
-//! Deterministic local responder with per-agent conversation history,
-//! workspace root (`ATLAS_BOX_WORKSPACE`), tool whitelist (LIST_DIR / READ /
-//! WRITE / RUN ls|pwd|cat|mkdir), streaming [`RuntimeHint`]s, and P5 VNC +
-//! attachments rooted under the agent workspace. Not grok-build; not a real LLM.
+//! Per-agent conversation history, workspace root (`ATLAS_BOX_WORKSPACE`), tool
+//! whitelist (LIST_DIR / READ / WRITE / RUN ls|pwd|cat|mkdir), streaming
+//! [`RuntimeHint`]s, and P5 VNC + attachments under the agent workspace.
 //!
-//! Interrupt: cancel in-flight `sendPrompt` via oneshot; idle interrupt
+//! RR1: optional OpenAI-compat LLM via `ATLAS_BOX_LLM_*`. When configured,
+//! pure-chat turns call `POST {base}/chat/completions` with history→`messages[]`.
+//! When unset / `ATLAS_BOX_LLM_MODE=mock|off`, keep deterministic `compose_reply`.
+//!
+//! **Tool vs LLM order (nailed):** tool triggers run first; if any tool evidence
+//! is produced, the turn replies with `compose_reply` (tools stay greppable /
+//! deterministic). Pure chat (no tool hit) uses the LLM when configured.
+//!
+//! Interrupt: cancel in-flight delay **or** LLM HTTP via oneshot; idle interrupt
 //! returns closed-set `command_rejected/no_active_run` (never fake success).
 
 #![allow(dead_code)]
@@ -46,7 +53,68 @@ pub const ENV_HUB_EVENT_TOKEN: &str = "ATLAS_HUB_EVENT_TOKEN";
 /// POST timeout for B1 RuntimeHint push (ms).
 pub const HUB_EVENT_POST_TIMEOUT_MS: u64 = 500;
 
+/// OpenAI-compat base URL for Box LLM (e.g. `http://127.0.0.1:11434/v1`).
+pub const ENV_BOX_LLM_BASE_URL: &str = "ATLAS_BOX_LLM_BASE_URL";
+/// API key for Box LLM (may be empty for local). Never logged / never in healthz.
+pub const ENV_BOX_LLM_API_KEY: &str = "ATLAS_BOX_LLM_API_KEY";
+/// Model name for Box LLM chat/completions.
+pub const ENV_BOX_LLM_MODEL: &str = "ATLAS_BOX_LLM_MODEL";
+/// `mock` | `off` → force deterministic compose_reply even if URL/model set.
+pub const ENV_BOX_LLM_MODE: &str = "ATLAS_BOX_LLM_MODE";
+/// Max user+assistant turn pairs retained in memory history (default 32).
+pub const ENV_BOX_HISTORY_MAX_TURNS: &str = "ATLAS_BOX_HISTORY_MAX_TURNS";
+/// Default history max turns when env unset.
+pub const DEFAULT_BOX_HISTORY_MAX_TURNS: usize = 32;
+/// Soft session persist: `1`/`true` → append `session.jsonl` under agent dir.
+pub const ENV_BOX_SESSION_PERSIST: &str = "ATLAS_BOX_SESSION_PERSIST";
+/// HTTP timeout for Box LLM chat/completions (ms). Default 60_000.
+pub const ENV_BOX_LLM_TIMEOUT_MS: &str = "ATLAS_BOX_LLM_TIMEOUT_MS";
+pub const DEFAULT_BOX_LLM_TIMEOUT_MS: u64 = 60_000;
+
 const DEFAULT_WORKSPACE: &str = "./data/box-workspace";
+
+/// Active OpenAI-compat LLM settings for Box (RR1).
+#[derive(Debug, Clone)]
+pub struct BoxLlmConfig {
+    pub base: String,
+    pub api_key: String,
+    pub model: String,
+    pub timeout: Duration,
+}
+
+impl BoxLlmConfig {
+    /// Parse from env. Returns `None` when unset or `ATLAS_BOX_LLM_MODE=mock|off`.
+    pub fn from_env() -> Option<Self> {
+        let mode = std::env::var(ENV_BOX_LLM_MODE)
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if mode == "mock" || mode == "off" {
+            return None;
+        }
+        let base = std::env::var(ENV_BOX_LLM_BASE_URL)
+            .ok()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())?;
+        let model = std::env::var(ENV_BOX_LLM_MODEL)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+        let api_key = std::env::var(ENV_BOX_LLM_API_KEY)
+            .ok()
+            .unwrap_or_default();
+        let timeout_ms = std::env::var(ENV_BOX_LLM_TIMEOUT_MS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_BOX_LLM_TIMEOUT_MS);
+        Some(Self {
+            base,
+            api_key,
+            model,
+            timeout: Duration::from_millis(timeout_ms),
+        })
+    }
+}
 
 /// Documented tool triggers (see runtime-deepen runbook).
 pub const TOOL_TRIGGER_LIST_DIR: &str = "LIST_DIR";
@@ -110,6 +178,12 @@ struct Shared {
     event_url: Option<String>,
     event_token: Option<String>,
     http: reqwest::Client,
+    /// RR1: optional OpenAI-compat LLM (None → deterministic compose_reply).
+    llm: Option<BoxLlmConfig>,
+    /// Max user+assistant pairs kept in `history` (truncates oldest).
+    history_max_turns: usize,
+    /// Soft append-only session.jsonl under agent workspace.
+    session_persist: bool,
 }
 
 /// Box Sidecar gateway: multi-turn + workspace tools + streaming hints + VNC/attach.
@@ -140,16 +214,64 @@ impl BoxSidecarGateway {
         if let Some(ref url) = event_url {
             info!(%url, "B1 hub event ingest URL enabled");
         }
-        Self::new_with_event(
+        let llm = BoxLlmConfig::from_env();
+        if let Some(ref cfg) = llm {
+            info!(
+                base = %cfg.base,
+                model = %cfg.model,
+                "RR1 box LLM configured (key redacted)"
+            );
+        }
+        let history_max_turns = std::env::var(ENV_BOX_HISTORY_MAX_TURNS)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_BOX_HISTORY_MAX_TURNS);
+        let session_persist = matches!(
+            std::env::var(ENV_BOX_SESSION_PERSIST)
+                .ok()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("1") | Some("true") | Some("yes") | Some("on")
+        );
+        Self::new_with_options(
             workspace,
             Duration::from_millis(delay_ms),
             event_url,
             event_token,
+            llm,
+            history_max_turns,
+            session_persist,
         )
     }
 
     pub fn new(workspace_root: PathBuf, turn_delay: Duration) -> Self {
-        Self::new_with_event(workspace_root, turn_delay, None, None)
+        Self::new_with_options(
+            workspace_root,
+            turn_delay,
+            None,
+            None,
+            None,
+            DEFAULT_BOX_HISTORY_MAX_TURNS,
+            false,
+        )
+    }
+
+    /// Test / programmatic constructor with optional LLM.
+    pub fn new_with_llm(
+        workspace_root: PathBuf,
+        turn_delay: Duration,
+        llm: Option<BoxLlmConfig>,
+    ) -> Self {
+        Self::new_with_options(
+            workspace_root,
+            turn_delay,
+            None,
+            None,
+            llm,
+            DEFAULT_BOX_HISTORY_MAX_TURNS,
+            false,
+        )
     }
 
     pub fn new_with_event(
@@ -157,6 +279,26 @@ impl BoxSidecarGateway {
         turn_delay: Duration,
         event_url: Option<String>,
         event_token: Option<String>,
+    ) -> Self {
+        Self::new_with_options(
+            workspace_root,
+            turn_delay,
+            event_url,
+            event_token,
+            None,
+            DEFAULT_BOX_HISTORY_MAX_TURNS,
+            false,
+        )
+    }
+
+    pub fn new_with_options(
+        workspace_root: PathBuf,
+        turn_delay: Duration,
+        event_url: Option<String>,
+        event_token: Option<String>,
+        llm: Option<BoxLlmConfig>,
+        history_max_turns: usize,
+        session_persist: bool,
     ) -> Self {
         let _ = std::fs::create_dir_all(&workspace_root);
         let (turn_tx, _) = tokio::sync::broadcast::channel(128);
@@ -242,8 +384,21 @@ impl BoxSidecarGateway {
                 event_url,
                 event_token,
                 http: reqwest::Client::new(),
+                llm,
+                history_max_turns: history_max_turns.max(1),
+                session_persist,
             }),
         }
+    }
+
+    /// `true` when Box will call OpenAI-compat chat/completions for pure chat.
+    pub fn llm_configured(&self) -> bool {
+        self.shared.llm.is_some()
+    }
+
+    /// Model name when LLM configured (never the API key).
+    pub fn llm_model(&self) -> Option<&str> {
+        self.shared.llm.as_ref().map(|c| c.model.as_str())
     }
 
     pub fn workspace_root(&self) -> &Path {
@@ -714,11 +869,124 @@ impl BoxSidecarGateway {
             let hist = guard.history.entry(agent_id.to_string()).or_default();
             hist.push(("user".into(), prompt.to_string()));
             hist.push(("assistant".into(), preview.clone()));
+            // Truncate oldest turns (each turn = user+assistant pair).
+            let max_msgs = self.shared.history_max_turns.saturating_mul(2);
+            if hist.len() > max_msgs {
+                let drop_n = hist.len() - max_msgs;
+                hist.drain(0..drop_n);
+            }
         }
         if let Some(a) = guard.agents.get_mut(agent_id) {
             a.is_running = false;
         }
-        Ok((preview, vec![user_entry, assistant_entry]))
+        let out = (preview.clone(), vec![user_entry, assistant_entry]);
+        drop(guard);
+        if self.shared.session_persist {
+            self.soft_persist_session(agent_id, prompt, &preview);
+        }
+        Ok(out)
+    }
+
+    /// Soft append-only session.jsonl (optional; failures are logged, not fatal).
+    fn soft_persist_session(&self, agent_id: &str, prompt: &str, reply: &str) {
+        self.ensure_agent_workspace(agent_id);
+        let path = self.agent_dir(agent_id).join("session.jsonl");
+        let line = json!({
+            "ts": now_ms(),
+            "user": prompt,
+            "assistant": reply,
+        });
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = writeln!(f, "{line}") {
+                    warn!(%agent_id, error = %e, "box session persist write failed (soft)");
+                }
+            }
+            Err(e) => {
+                warn!(%agent_id, error = %e, "box session persist open failed (soft)");
+            }
+        }
+    }
+
+    /// Build OpenAI-compat messages[] from memory history + current user prompt.
+    fn build_llm_messages(&self, agent_id: &str, prompt: &str, history: &[(String, String)]) -> Vec<Value> {
+        let mut messages = Vec::new();
+        messages.push(json!({
+            "role": "system",
+            "content": format!(
+                "You are atlas-bot box sidecar agent {agent_id}. Reply concisely. Do not echo the user prompt verbatim."
+            ),
+        }));
+        for (role, text) in history {
+            if role == "user" || role == "assistant" {
+                messages.push(json!({ "role": role, "content": text }));
+            }
+        }
+        messages.push(json!({ "role": "user", "content": prompt }));
+        messages
+    }
+
+    async fn chat_complete(
+        &self,
+        agent_id: &str,
+        prompt: &str,
+        history: &[(String, String)],
+        mut kill_rx: oneshot::Receiver<()>,
+    ) -> Result<String, GatewayError> {
+        let cfg = self
+            .shared
+            .llm
+            .as_ref()
+            .ok_or_else(|| GatewayError::Upstream("box LLM not configured".into()))?;
+        let url = format!("{}/chat/completions", cfg.base);
+        let messages = self.build_llm_messages(agent_id, prompt, history);
+        let body = json!({
+            "model": cfg.model,
+            "messages": messages,
+        });
+        let mut req = self.shared.http.post(&url).json(&body).timeout(cfg.timeout);
+        if !cfg.api_key.is_empty() {
+            req = req.bearer_auth(&cfg.api_key);
+        }
+        let send_fut = req.send();
+
+        let resp = tokio::select! {
+            r = send_fut => r.map_err(|e| GatewayError::Upstream(format!("box LLM request failed: {e}")))?,
+            _ = &mut kill_rx => {
+                return Err(GatewayError::Upstream("gateway/run-interrupted".into()));
+            }
+        };
+
+        let status = resp.status();
+        let val: Value = resp
+            .json()
+            .await
+            .map_err(|e| GatewayError::Upstream(format!("box LLM response json: {e}")))?;
+        if !status.is_success() {
+            return Err(GatewayError::Upstream(format!(
+                "box LLM HTTP {status}: {val}"
+            )));
+        }
+        let text = val
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            return Err(GatewayError::Upstream("box LLM empty content".into()));
+        }
+        if text == prompt || text == format!("echo: {prompt}") {
+            return Err(GatewayError::Upstream(
+                "box LLM reply looked like stub echo; refusing".into(),
+            ));
+        }
+        Ok(text)
     }
 
     async fn send_prompt(&self, agent_id: &str, args: &Value) -> Result<Value, GatewayError> {
@@ -731,7 +999,7 @@ impl BoxSidecarGateway {
         self.mark_running(agent_id).await?;
         self.clear_pending(agent_id).await;
 
-        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
         {
             let mut pending = self.shared.pending.write().await;
             pending.insert(
@@ -742,43 +1010,72 @@ impl BoxSidecarGateway {
             );
         }
 
-        // Interruptible work window (tools + delay).
+        // Interruptible delay window (kept for R1 interrupt smoke).
         let delay = self.shared.turn_delay;
-        let interrupted = tokio::select! {
-            _ = tokio::time::sleep(delay) => false,
-            _ = cancel_rx => true,
-        };
-
-        if interrupted {
-            warn!(%agent_id, "box sidecar sendPrompt interrupted");
-            self.clear_pending(agent_id).await;
-            self.set_running(agent_id, false).await;
-            self.append_system_notice(agent_id, "run interrupted").await;
-            return Err(GatewayError::Upstream("gateway/run-interrupted".into()));
+        if !delay.is_zero() {
+            let interrupted = tokio::select! {
+                _ = tokio::time::sleep(delay) => false,
+                _ = &mut cancel_rx => true,
+            };
+            if interrupted {
+                warn!(%agent_id, "box sidecar sendPrompt interrupted (delay)");
+                self.clear_pending(agent_id).await;
+                self.set_running(agent_id, false).await;
+                self.append_system_notice(agent_id, "run interrupted").await;
+                return Err(GatewayError::Upstream("gateway/run-interrupted".into()));
+            }
         }
 
-        // Snapshot prior user texts for context (before committing this turn).
-        let prior_users: Vec<String> = {
+        // Snapshot history before committing this turn.
+        let history_snapshot: Vec<(String, String)> = {
             let guard = self.shared.inner.read().await;
             guard
                 .history
                 .get(agent_id)
-                .map(|h| {
-                    h.iter()
-                        .filter(|(role, _)| role == "user")
-                        .map(|(_, t)| t.clone())
-                        .collect()
-                })
+                .cloned()
                 .unwrap_or_default()
         };
+        let prior_users: Vec<String> = history_snapshot
+            .iter()
+            .filter(|(role, _)| role == "user")
+            .map(|(_, t)| t.clone())
+            .collect();
 
+        // Tool-vs-LLM order: tools first; tool evidence → compose_reply;
+        // pure chat → LLM when configured, else compose_reply.
         let tool_evidence = self.maybe_run_tools(agent_id, &prompt);
-        let reply = self.compose_reply(
-            agent_id,
-            &prompt,
-            &prior_users,
-            tool_evidence.as_deref(),
-        );
+
+        let reply = if tool_evidence.is_some() {
+            let _ = cancel_rx; // tools path: cancel already survived delay
+            self.compose_reply(
+                agent_id,
+                &prompt,
+                &prior_users,
+                tool_evidence.as_deref(),
+            )
+        } else if self.shared.llm.is_some() {
+            match self
+                .chat_complete(agent_id, &prompt, &history_snapshot, cancel_rx)
+                .await
+            {
+                Ok(text) => text,
+                Err(e) => {
+                    self.clear_pending(agent_id).await;
+                    self.set_running(agent_id, false).await;
+                    let interrupted = match &e {
+                        GatewayError::Upstream(s) => s == "gateway/run-interrupted",
+                        _ => false,
+                    };
+                    if interrupted {
+                        self.append_system_notice(agent_id, "run interrupted").await;
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            let _ = cancel_rx;
+            self.compose_reply(agent_id, &prompt, &prior_users, None)
+        };
 
         // Hard non-echo guard.
         if reply == prompt || reply == format!("echo: {prompt}") {
