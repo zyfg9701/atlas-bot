@@ -133,4 +133,4 @@ fi
 echo
 echo "Install root: $ROOT"
 echo "Next: start stack (menu or \"$START_SH\"), then open PC (menu or \"$PC_BIN\")"
-echo "Unsigned / Gatekeeper yellow is OK. Not a store package. T2 MSI deferred."
+echo "Unsigned / Gatekeeper yellow is OK. Not a store package. Win MSI: scripts/build-msi.ps1 (T2-W)."

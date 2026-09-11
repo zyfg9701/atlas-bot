@@ -1,11 +1,11 @@
-# Packaging / install skeleton (P1) + installer thickening (T1)
+# Packaging / install skeleton (P1) + installer thickening (T1) + T2 MSI
 
-> Date: 2026-09-10 · baseline `main`@`fd837c7`  
-> Goal: unify `dist/` + cargo/tauri collection + install/start scripts for Hub+gateway(+cli)+PC; **T1** adds portable zip/tar.gz archives + Win Start Menu shortcuts + Unix `.desktop` entries.  
-> **Still not:** store listing, code signing / notarization, WeCom tickets, MSI/NSIS/DEB/RPM (**T2 MSI deferred**), auto-update, packaging external `agent`, `bot.*` changes.
+> Date: 2026-09-11 · baseline `main`@`fde2a6c`  
+> Goal: unify `dist/` + cargo/tauri collection + install/start scripts for Hub+gateway(+cli)+PC; **T1** adds portable zip/tar.gz archives + Win Start Menu shortcuts + Unix `.desktop` entries; **T2·W / MSI1** adds WiX v4 per-user MSI + ARP (zip retained).  
+> **Still not:** store listing, code signing / notarization, WeCom tickets, NSIS/DEB/RPM, auto-update, packaging external `agent`, `bot.*` changes, forced admin / Program Files.
 
-Acceptance: knowledge-handoff `feitian-installer-thickening-acceptance.md` · feasibility `pangu-installer-thickening-feasibility.md`  
-(P1 prior: `feitian-packaging-install-skeleton-acceptance.md`)
+Acceptance: knowledge-handoff `feitian-t2-msi-acceptance.md` · feasibility `pangu-t2-msi-feasibility.md`  
+(T1: `feitian-installer-thickening-acceptance.md`; P1: `feitian-packaging-install-skeleton-acceptance.md`)
 
 ---
 
@@ -18,8 +18,9 @@ dist/                          # produced by scripts/pack-dist.* (gitignored bin
   scripts/                     # start-cli-stack.* + install-shortcuts.ps1 + install-desktop-entry.sh
   README-INSTALL.md
 
-artifacts/                     # produced by scripts/archive-dist.* (gitignored)
+artifacts/                     # produced by archive-dist / build-msi (gitignored)
   atlas-bot-<ver>-windows-x64.zip
+  atlas-bot-<ver>-windows-x64.msi   # T2·W — Win host + WiX v4 only
   atlas-bot-<ver>-linux-x64.tar.gz
   # optional macos-*.tar.gz
 
@@ -27,10 +28,14 @@ packaging/templates/           # sources copied into dist/ by pack
   README-INSTALL.md
   scripts/start-cli-stack.*
 
+packaging/wix/                 # T2·W WiX v4 sources (Product / Components / Shortcuts)
+  Product.wxs · Components.wxs · Shortcuts.wxs · README.md
+
 scripts/pack-dist.sh|.ps1      # cargo --release + tauri build --no-bundle → dist/
 scripts/archive-dist.sh|.ps1   # T1: zip/tar.gz from existing dist/ (no rebuild)
+scripts/build-msi.ps1          # T2·W: WiX v4 MSI from existing dist/ (Windows only)
 scripts/install-local.sh|.ps1  # copy dist → user home (no admin) + entries
-scripts/install-shortcuts.ps1  # T1: Win Start Menu (+ optional Desktop)
+scripts/install-shortcuts.ps1  # T1 zip path: Win Start Menu (+ optional Desktop)
 scripts/install-desktop-entry.sh # T1: ~/.local/share/applications/*.desktop
 scripts/dev-cli-stack.sh|.ps1  # DEV path (cargo run) — unchanged
 ```
@@ -78,13 +83,13 @@ Mock bypass remains **dev-tree only** (`tools/mock-cli/…`); default dist does 
 
 - `cargo build -p atlas-bot-hub -p atlas-bot-gateway -p atlas-bot-cli --release` → `dist/bin/`
 - PC: `npm run tauri -- build --no-bundle` → copy `clients/pc/src-tauri/target/release/atlas-bot-pc[.exe]` → `dist/pc/`
-- `--no-bundle` / no store targets: **never** MSI, NSIS, MS Store, Mac App Store for P1/T1
+- `--no-bundle` / no store targets: pack never emits Tauri MSI/NSIS/MS Store/Mac App Store; **T2-W** MSI is external WiX over `dist/` (see § T2 MSI)
 - `--skip-pc` / `-SkipPc` if WebKit/GTK missing on the pack host
 - `--skip-cli` / `-SkipCli` optional (default **includes** `atlas-bot-cli`)
 
 ### Tauri `bundle`
 
-`clients/pc/src-tauri/tauri.conf.json` keeps `bundle.active=false` historically; pack always passes `--no-bundle` so even if `active` is flipped later, P1/T1 still collects the **raw executable only**. Do **not** enable store channels. **T2 MSI** (optional, deferred) must whitelist `targets` to `msi` only.
+`clients/pc/src-tauri/tauri.conf.json` keeps `bundle.active=false` historically; pack always passes `--no-bundle` so even if `active` is flipped later, P1/T1 still collects the **raw executable only**. Do **not** enable store channels. **T2·W MSI** is an **external WiX** package over `dist/` (not Tauri bundle). Pack still uses `--no-bundle`; do **not** enable store channels.
 
 ### PC artifact shape (platform)
 
@@ -149,9 +154,59 @@ Unsigned: Windows SmartScreen / macOS Gatekeeper yellow is OK — see `dist/READ
 | `atlas-bot-cli` | **Default included** in `dist/bin/` (omit with `--skip-cli`). |
 | start vs `dev-cli-stack` | **Independent** dist scripts (no cargo); contract table above. |
 | Yellow copy | README-INSTALL intro + Windows/macOS open notes; T1 does **not** promise to clear SmartScreen / Gatekeeper. |
-| MSI | **T2 deferred** — not required for T1 DoD. |
+| MSI | **T2·W done (source+script)** — WiX v4 · per-user LOCALAPPDATA · see § T2 MSI. Real `.msi` on Win host (**MSI-P* Win 机待补** on Linux). |
 
 ---
+
+
+## T2 MSI (T2·W / MSI1 · WiX v4)
+
+Relative to T1: **adds** MSI + ARP uninstall; **does not** redo `dist/` / pack / start; **keeps** zip.
+
+### Flow
+
+```powershell
+.\scripts\pack-dist.ps1          # produce dist\ (Hub+gateway+cli+PC)
+.\scripts\build-msi.ps1          # WiX v4 → artifacts\atlas-bot-<ver>-windows-x64.msi
+# Install (no admin / no Program Files):
+msiexec /i .\artifacts\atlas-bot-*-windows-x64.msi
+# Start Menu → atlas-bot → Start CLI Stack → then atlas-bot PC
+# Uninstall: Settings → Apps → atlas-bot  (ARP)
+```
+
+Silent: `msiexec /i … /qn`. Optional Desktop shortcuts (default **off**):  
+`msiexec /i … ADDLOCAL=ProductFeature,DesktopShortcuts`.
+
+### Pins
+
+| Item | Value |
+|------|--------|
+| WiX | **v4** (`wix build`) — see `packaging/wix/README.md` |
+| UpgradeCode | `DAB90D5E-C3DB-405C-9024-769247FFC85F` (**fixed**) |
+| ProductName / ARP | `atlas-bot` |
+| InstallScope | `perUser` → **`%LOCALAPPDATA%\atlas-bot`** |
+| Payload | `bin/` (hub+gateway+cli) · `pc/` · `scripts/` · `README-INSTALL.md` — **no** external `agent` |
+| Shortcuts | **WiX Shortcut** elements (`Shortcuts.wxs`); **not** `install-shortcuts.ps1` (no double `.lnk`) |
+| Desktop Feature | `DesktopShortcuts` Level=2 → default off |
+| MajorUpgrade | yes |
+| Filename version | `-Version` / `ATLAS_BOT_VERSION` / `git describe` / Cargo hub (same family as archive-dist) |
+| MSI ProductVersion | numeric X.Y.Z via `-ProductVersion` / numeric env / Cargo hub |
+| Zip coexistence | `archive-dist` zip **retained**; prefer one path day-to-day; MSI uninstall does **not** guarantee clearing later manual unpack overlays |
+| Yellow / SmartScreen | **OK** — unsigned; not store; T2 does **not** clear SmartScreen |
+| Linux CI | **does not** build MSI; `build-msi.ps1` fails clearly on non-Windows |
+
+### Hand-test (MSI-P*)
+
+| ID | Step | Expect |
+|----|------|--------|
+| **MSI-P1** | pack-dist → build-msi | `artifacts/atlas-bot-<ver>-windows-x64.msi` |
+| **MSI-P2** | install MSI | tree under `%LOCALAPPDATA%\atlas-bot`; no forced admin |
+| **MSI-P3** | Start Menu → Start CLI Stack | healthz `backend=cli`; no agent → non-zero |
+| **MSI-P4** | Start Menu → PC | shell starts; Connect/Send |
+| **MSI-P5** | uninstall | files + Start Menu cleared; ARP gone |
+| **MSI-P6** | (optional) zip path | still works per T1 docs |
+
+**Evidence on this Linux pack host:** WiX sources + `build-msi.ps1` + docs reviewed; real `.msi` / MSI-P1–P5 → **「Win 机待补」**.
 
 ## One-liners
 
@@ -189,6 +244,15 @@ Expand-Archive .\artifacts\atlas-bot-*-windows-x64.zip -DestinationPath .
 .\atlas-bot\scripts\install-shortcuts.ps1 -InstallRoot (Resolve-Path .\atlas-bot)
 & ".\atlas-bot\scripts\start-cli-stack.ps1"
 # then Start Menu → atlas-bot PC   (or & ".\atlas-bot\pc\atlas-bot-pc.exe")
+```
+
+### T2 MSI → Start Menu → start → PC → uninstall
+
+```powershell
+.\scripts\pack-dist.ps1; .\scripts\build-msi.ps1
+msiexec /i .\artifacts\atlas-bot-*-windows-x64.msi
+# Start Menu → atlas-bot Start CLI Stack → atlas-bot PC
+# Uninstall: Apps & Features → atlas-bot
 ```
 
 ---

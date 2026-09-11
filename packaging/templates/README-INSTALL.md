@@ -1,8 +1,9 @@
-# atlas-bot · local install (P1 skeleton + T1 installer thickening)
+# atlas-bot · local install (P1 + T1 + T2 MSI)
 
-> **Not** a store listing. **Not** code-signed / notarized. **Not** WeCom ticket flow. **Not** MSI (T2 deferred).
+> **Not** a store listing. **Not** code-signed / notarized. **Not** WeCom ticket flow.
 > Yellow SmartScreen / Gatekeeper prompts are **expected** — you can still run (Windows: More info → Run anyway; macOS: Right-click → Open).
 > Does **not** change `bot.*` wire. Does **not** ship the external Cursor/Atlas `agent` binary.
+> **T2·W:** optional WiX MSI (per-user `%LOCALAPPDATA%\atlas-bot` + ARP); **zip path remains**.
 
 This tree is produced by `scripts/pack-dist.sh` / `scripts/pack-dist.ps1`, archived by `scripts/archive-dist.*`, or copied by `install-local`.
 
@@ -14,10 +15,11 @@ dist/   (or ~/atlas-bot / %LOCALAPPDATA%\atlas-bot after install)
   README-INSTALL.md    # this file
 ```
 
-Portable archives (T1):
+Portable archives (T1) + MSI (T2·W):
 
 ```text
 artifacts/atlas-bot-<ver>-windows-x64.zip
+artifacts/atlas-bot-<ver>-windows-x64.msi   # Windows + WiX v4 only; see § T2 MSI
 artifacts/atlas-bot-<ver>-linux-x64.tar.gz
 # optional: macos-*.tar.gz (same layout; still not .app / not notarized)
 ```
@@ -35,8 +37,9 @@ Distribution uses **this** tree (`bin/*` only — **never** `cargo run`). See [`
 |------|------|
 | **A. Repo pack → install-local** | You have a clone + toolchain; writes user home + Start Menu / `.desktop` |
 | **B. Unpack archive → entry script** | You only have the zip/tar; run `install-shortcuts.ps1` / `install-desktop-entry.sh` from the unpacked tree |
+| **C. MSI (T2·W, Windows)** | Double-click / `msiexec` the `.msi`; ARP uninstall + Start Menu; same install root |
 
-Both keep the same `bin/` + `start-cli-stack` contract.
+A/B/C keep the same `bin/` + `start-cli-stack` contract. Prefer **one** path day-to-day (MSI **or** zip); mixing onto the same folder is unsupported for clean uninstall.
 
 ---
 
@@ -144,6 +147,56 @@ Shortcuts set **WorkingDirectory** to the install root (spaces-safe). Default = 
 
 ---
 
+
+---
+
+## T2 MSI (Windows · WiX v4)
+
+> Still **not** store / Authenticode. SmartScreen yellow **OK**. Linux CI does **not** build MSI.
+
+### Build (repo + Windows + WiX v4)
+
+```powershell
+.\scripts\pack-dist.ps1
+.\scripts\build-msi.ps1
+# → artifacts\atlas-bot-<ver>-windows-x64.msi
+```
+
+Requires an existing `dist\` with Hub+gateway+cli+PC (no `-SkipPc` / `-SkipCli`).  
+WiX **v4** only (`wix build`). Non-Windows hosts fail clearly — see `packaging/wix/README.md`.
+
+### Install → Start Menu → start → PC
+
+```powershell
+msiexec /i .\artifacts\atlas-bot-*-windows-x64.msi
+# default root: %LOCALAPPDATA%\atlas-bot\  (per-user; no admin / not Program Files)
+# Start Menu: Programs\atlas-bot\
+#   • atlas-bot PC
+#   • atlas-bot Start CLI Stack
+# Desktop shortcuts: default OFF
+#   msiexec /i … ADDLOCAL=ProductFeature,DesktopShortcuts
+```
+
+Then: Start Menu → **atlas-bot Start CLI Stack** → **atlas-bot PC** → Connect → Send.
+
+Silent: `msiexec /i … /qn`.
+
+### ARP uninstall
+
+Settings → Apps → **atlas-bot** (or `msiexec /x {ProductCode}`). Removes install tree + Start Menu entries (and Desktop if that Feature was installed).
+
+### Zip coexistence
+
+T1 zip (`archive-dist`) **remains** for portable / non-MSI machines. MSI uninstall does **not** guarantee clearing files you later unpacked manually onto `%LOCALAPPDATA%\atlas-bot`.
+
+### Pins
+
+| Item | Value |
+|------|--------|
+| UpgradeCode | `DAB90D5E-C3DB-405C-9024-769247FFC85F` (fixed) |
+| Shortcuts | WiX built-in (not a second pass of `install-shortcuts.ps1`) |
+| start contract | `scripts\start-cli-stack.ps1` → `bin\*` only; no `cargo run` |
+
 ## Hand-test checklist
 
 | ID | Step | Expect |
@@ -157,9 +210,14 @@ Shortcuts set **WorkingDirectory** to the install root (spaces-safe). Default = 
 | **T-P3** | PC shortcut | shell starts; Connect → Send |
 | **T-P4** | archive tar.gz → desktop-entry | tree OK; `.desktop` written |
 | **T-P5** | start + PC (script or `.desktop`) | healthz `backend=cli`; PC launchable |
+| **MSI-P1** | pack-dist → build-msi | `artifacts/atlas-bot-<ver>-windows-x64.msi` |
+| **MSI-P2** | install MSI | `%LOCALAPPDATA%\atlas-bot`; no forced admin |
+| **MSI-P3** | Start Menu → Start Stack | healthz `backend=cli`; no agent → non-zero |
+| **MSI-P4** | Start Menu → PC | shell starts; Connect → Send |
+| **MSI-P5** | uninstall | files + shortcuts cleared; ARP gone |
 
 ---
 
-## Out of scope (T1)
+## Out of scope
 
-MSI/NSIS/DEB/RPM/store (T2 MSI deferred), code signing / notarization, auto-update, packaging external `agent`, WeCom tickets, mobile store packages, changing `bot.*`, redoing P1 dist/start contract.
+MS Store / domestic stores, Authenticode / EV / clearing SmartScreen, NSIS/DEB/RPM, macOS pkg/`.app`/notarization, auto-update, packaging external `agent`, WeCom tickets, mobile store packages, changing `bot.*`, redoing P1 dist/start contract, forced admin / Program Files, deleting T1 zip.

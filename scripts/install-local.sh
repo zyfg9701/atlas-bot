@@ -92,4 +92,4 @@ echo "  2. Open PC:      \"$DEST/pc/atlas-bot-pc\"   # or app menu: atlas-bot PC
 echo "  3. Connect → ws://127.0.0.1:7700/ws → select agent → Send"
 echo
 echo "Unsigned / yellow prompt is OK (SmartScreen / Gatekeeper). Not a store package."
-echo "T2 MSI deferred. See: $DEST/README-INSTALL.md"
+echo "T2 MSI: see scripts/build-msi.ps1 + packaging/wix/ (Windows). See: $DEST/README-INSTALL.md"

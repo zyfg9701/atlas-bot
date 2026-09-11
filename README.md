@@ -48,7 +48,7 @@ Local `dist/` + portable zip/tar.gz + Win Start Menu / Unix `.desktop`: [`docs/p
 # Win: .\scripts\archive-dist.ps1; .\scripts\install-local.ps1  → Start Menu
 ```
 
-**Not** store listing / notarization / WeCom tickets / MSI (**T2 deferred**). Unsigned yellow prompts OK. Does **not** change `bot.*`. Does **not** ship external `agent`. Dev path remains `scripts/dev-cli-stack.*` + `cargo run`.
+**Not** store listing / notarization / WeCom tickets / MSI (T2·W: `scripts/build-msi.ps1` + `packaging/wix/`; still not store/signed). Unsigned yellow prompts OK. Does **not** change `bot.*`. Does **not** ship external `agent`. Dev path remains `scripts/dev-cli-stack.*` + `cargo run`.
 
 ## Quick check
 

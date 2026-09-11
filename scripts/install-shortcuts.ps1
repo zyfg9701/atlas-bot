@@ -155,4 +155,4 @@ Write-Host ''
 Write-Host "Install root: $InstallRoot"
 Write-Host "Start Menu:   $Programs"
 Write-Host 'Next: click "atlas-bot Start CLI Stack", then "atlas-bot PC" → Connect → Send'
-Write-Host 'Unsigned / SmartScreen yellow is OK. Not a store package. T2 MSI deferred.'
+Write-Host 'Unsigned / SmartScreen yellow is OK. Not a store package. For MSI see scripts/build-msi.ps1 (T2·W).'
