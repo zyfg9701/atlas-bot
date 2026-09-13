@@ -217,3 +217,16 @@ ul.agents li.selected { border-color: var(--accent); background: #1c2a40; }
   clip: rect(0, 0, 0, 0);
   border: 0;
 }
+
+/* GA1 thin approval card (Chat only; no IA redo) */
+.approval-card {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: #2a2114;
+}
+.approval-card[hidden] { display: none !important; }
+.approval-title { font-weight: 600; margin-bottom: 6px; color: var(--warn); }
+.approval-body { font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; white-space: pre-wrap; max-height: 6em; overflow: auto; }
+.approval-actions { display: flex; gap: 8px; }

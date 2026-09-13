@@ -21,6 +21,7 @@
 pub mod box_sidecar;
 pub mod cli_gateway;
 pub mod openai_gateway;
+pub mod tool_approval;
 
 pub use box_sidecar::{
     BoxLlmConfig, BoxSidecarGateway, DEFAULT_BOX_HISTORY_MAX_TURNS, DEFAULT_BOX_LLM_TIMEOUT_MS,
@@ -29,6 +30,11 @@ pub use box_sidecar::{
     ENV_BOX_SESSION_PERSIST, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE, ENV_HUB_EVENT_TOKEN,
     ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS, TOOL_TRIGGER_LIST_DIR, TOOL_TRIGGER_READ_FILE,
     TOOL_TRIGGER_WRITE_FILE,
+};
+pub use tool_approval::{
+    ApprovalDecision, ToolApprovalMode, APPROVAL_PENDING_PREFIX, DEFAULT_TOOL_APPROVAL_TIMEOUT_MS,
+    ENV_TOOL_APPROVAL_MODE, ENV_TOOL_APPROVAL_TIMEOUT_MS, ENV_TOOL_APPROVAL_TOKEN, REASON_AUTO_DENY,
+    REASON_DENIED, REASON_TIMEOUT,
 };
 pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_STREAM, ENV_AGENT_CLI_TIMEOUT_MS};
 pub use openai_gateway::{
@@ -42,8 +48,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -51,7 +57,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Default seed agent used by the in-memory stub.
@@ -225,6 +231,21 @@ pub trait Gateway: Send + Sync {
     async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
         let _ = agent_id;
         Err(GatewayError::UnknownMethod("vncDescriptor".into()))
+    }
+
+    /// GA1: resolve a pending tool approval (`POST /approve`). Default: unsupported.
+    async fn tool_approve(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<Value, GatewayError> {
+        let _ = (approval_id, decision);
+        Err(GatewayError::UnknownMethod("approve".into()))
+    }
+
+    /// `(mode, token_configured)` when this gateway supports the approval gate.
+    fn tool_approval_info(&self) -> Option<(String, bool)> {
+        None
     }
 }
 
@@ -1260,6 +1281,10 @@ pub struct GatewayHttpMeta {
     pub llm_configured: Option<bool>,
     /// Optional model name when LLM configured (still no key).
     pub llm_model: Option<String>,
+    /// GA1: `ATLAS_TOOL_APPROVAL_MODE` when gate present (`gate`/`auto_deny`/`off`).
+    pub tool_approval_mode: Option<String>,
+    /// GA1: whether `/approve` requires a token (never echoes the secret).
+    pub tool_approval_token_configured: Option<bool>,
 }
 
 impl GatewayHttpMeta {
@@ -1270,6 +1295,8 @@ impl GatewayHttpMeta {
             agent_cli_found: None,
             llm_configured: None,
             llm_model: None,
+            tool_approval_mode: None,
+            tool_approval_token_configured: None,
         }
     }
 
@@ -1282,6 +1309,12 @@ impl GatewayHttpMeta {
     pub fn with_llm(mut self, configured: bool, model: Option<String>) -> Self {
         self.llm_configured = Some(configured);
         self.llm_model = model;
+        self
+    }
+
+    pub fn with_tool_approval(mut self, mode: impl Into<String>, token_configured: bool) -> Self {
+        self.tool_approval_mode = Some(mode.into());
+        self.tool_approval_token_configured = Some(token_configured);
         self
     }
 
@@ -1301,6 +1334,16 @@ impl GatewayHttpMeta {
         }
         if let Some(ref model) = self.llm_model {
             m.insert("llm_model".into(), json!(model));
+        }
+        if let Some(ref mode) = self.tool_approval_mode {
+            m.insert("tool_approval_mode".into(), json!(mode));
+            m.insert(
+                "tool_approval_gate".into(),
+                json!(mode == "gate" || mode == "auto_deny"),
+            );
+        }
+        if let Some(t) = self.tool_approval_token_configured {
+            m.insert("tool_approval_token_configured".into(), json!(t));
         }
         Value::Object(m)
     }
@@ -1366,7 +1409,107 @@ async fn http_stats_dyn(State(st): State<DynHttpState>) -> Json<Value> {
     Json(body)
 }
 
-/// Serve `/invoke`, `/vnc-descriptor`, `/vnc-stub`, `/healthz`, `/stats`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApproveRequest {
+    approval_id: String,
+    decision: String,
+}
+
+fn approval_token_ok(headers: &HeaderMap, expected: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        let auth = auth.trim();
+        if let Some(rest) = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")) {
+            if rest.trim() == expected {
+                return true;
+            }
+        }
+    }
+    if let Some(v) = headers
+        .get("x-atlas-approval-token")
+        .and_then(|v| v.to_str().ok())
+    {
+        if v.trim() == expected {
+            return true;
+        }
+    }
+    false
+}
+
+async fn http_approve_dyn(
+    State(st): State<DynHttpState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<ApproveRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
+    if !addr.ip().is_loopback() {
+        warn!(%addr, "GA1 /approve rejected: non-loopback");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": "loopback_only",
+                "detail": "POST /approve is loopback-only",
+            })),
+        ));
+    }
+    // Token value is never stored in meta; re-read env when configured.
+    let expected = if st.meta.tool_approval_token_configured == Some(true) {
+        std::env::var(crate::ENV_TOOL_APPROVAL_TOKEN)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    if !approval_token_ok(&headers, expected.as_deref()) {
+        warn!("GA1 /approve rejected: bad or missing token");
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "ok": false,
+                "error": "unauthorized",
+                "detail": "missing or invalid approval token",
+            })),
+        ));
+    }
+    let approval_id = body.approval_id.trim().to_string();
+    if approval_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": "invalid_args",
+                "detail": "missing approvalId",
+            })),
+        ));
+    }
+    match st.gw.tool_approve(&approval_id, &body.decision).await {
+        Ok(v) => Ok(Json(v)),
+        Err(GatewayError::Rejected { reason, detail }) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": reason,
+                "detail": detail,
+            })),
+        )),
+        Err(GatewayError::UnknownMethod(_)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "ok": false,
+                "error": "not_supported",
+                "detail": "tool approval not available on this backend",
+            })),
+        )),
+        Err(e) => Err(map_gateway_http_err(e)),
+    }
+}
+
+/// Serve `/invoke`, `/vnc-descriptor`, `/vnc-stub`, `/healthz`, `/stats`, `/approve`.
 pub fn gateway_http_router(gw: Arc<dyn Gateway>) -> Router {
     gateway_http_router_with_meta(gw, GatewayHttpMeta::default())
 }
@@ -1379,6 +1522,7 @@ pub fn gateway_http_router_with_meta(gw: Arc<dyn Gateway>, meta: GatewayHttpMeta
         .route("/vnc-stub", get(http_vnc_stub))
         .route("/healthz", get(http_healthz_dyn))
         .route("/stats", get(http_stats_dyn))
+        .route("/approve", post(http_approve_dyn))
         .with_state(DynHttpState { gw, meta })
 }
 
@@ -1396,7 +1540,11 @@ pub async fn serve_gateway_http_with_meta(
 ) -> Result<(), std::io::Error> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, backend = %meta.backend, "gateway HTTP listening");
-    axum::serve(listener, gateway_http_router_with_meta(gw, meta)).await
+    axum::serve(
+        listener,
+        gateway_http_router_with_meta(gw, meta).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
 }
 
 pub struct HttpGatewayClient {

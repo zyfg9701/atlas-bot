@@ -2,8 +2,9 @@
 //!
 //! Listens on loopback by default (`127.0.0.1:8787`) and exposes:
 //! - `POST /invoke` — Bot-Relay hot commands
-//! - `GET  /healthz` — JSON `{ ok, backend, agent_cli?, agent_cli_found?, llm_configured? }`
-//! - `GET  /stats` — `{ invoke_count, backend, agent_cli?, agent_cli_found?, llm_configured? }`
+//! - `GET  /healthz` — JSON `{ ok, backend, …, tool_approval_mode?, tool_approval_gate? }`
+//! - `GET  /stats` — `{ invoke_count, backend, … }`
+//! - `POST /approve` — GA1 tool approval `{ approvalId, decision: allow|deny }` (loopback-only)
 //!
 //! Env:
 //! - `ATLAS_GATEWAY_HTTP_BIND` — default `127.0.0.1:8787`
@@ -12,6 +13,8 @@
 //! - `ATLAS_AGENT_CLI_EXTRA_ARGS` — JSON string array
 //! - `ATLAS_OPENAI_*` — when backend=`openai`
 //! - `ATLAS_BOX_WORKSPACE` / `ATLAS_BOX_TURN_DELAY_MS` / `ATLAS_BOX_LLM_*` — when backend=`box`
+//! - `ATLAS_TOOL_APPROVAL_MODE` / `ATLAS_TOOL_APPROVAL_TIMEOUT_MS` / `ATLAS_TOOL_APPROVAL_TOKEN`
+//!   — GA1 box tool gate (see docs/tool-approval-runbook.md); product default mode=`gate`
 //! - `ATLAS_HUB_EVENT_URL` / `ATLAS_HUB_EVENT_TOKEN` — B1 mid-turn RuntimeHint POST
 //!   to Hub loopback ingest (see docs/b1-event-ingest-runbook.md)
 //!
@@ -64,10 +67,19 @@ async fn main() {
             let g = BoxSidecarGateway::from_env();
             let llm_configured = g.llm_configured();
             let llm_model = g.llm_model().map(|s| s.to_string());
-            info!(llm_configured, llm_model = ?llm_model, "box sidecar ready");
+            let approval_mode = g.tool_approval_mode().as_str().to_string();
+            let approval_token = g.tool_approval_token_configured();
+            info!(
+                llm_configured,
+                llm_model = ?llm_model,
+                tool_approval_mode = %approval_mode,
+                "box sidecar ready"
+            );
             (
                 Arc::new(g),
-                GatewayHttpMeta::for_backend("box").with_llm(llm_configured, llm_model),
+                GatewayHttpMeta::for_backend("box")
+                    .with_llm(llm_configured, llm_model)
+                    .with_tool_approval(approval_mode, approval_token),
             )
         }
         "cli" | _ => {
