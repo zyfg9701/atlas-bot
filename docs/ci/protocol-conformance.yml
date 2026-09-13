@@ -32,6 +32,8 @@ jobs:
         run: cargo test -p atlas-bot-hub --test runtime_smoke -- --nocapture --test-threads=1
       - name: R2 runtime deepen smoke
         run: cargo test -p atlas-bot-hub --test runtime_deepen_smoke -- --nocapture --test-threads=1
+      - name: GA1 tool approval smoke
+        run: cargo test -p atlas-bot-hub --test tool_approval_smoke -- --nocapture --test-threads=1
       - name: B1 event ingest smoke
         run: cargo test -p atlas-bot-hub --test b1_smoke -- --nocapture --test-threads=1
       - name: I1 IdP auth gate smoke

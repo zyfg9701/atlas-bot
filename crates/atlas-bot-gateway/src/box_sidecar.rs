@@ -14,6 +14,10 @@
 //!
 //! Interrupt: cancel in-flight delay **or** LLM HTTP via oneshot; idle interrupt
 //! returns closed-set `command_rejected/no_active_run` (never fake success).
+//!
+//! GA1 tool approval: `WRITE_FILE` / `RUN mkdir` / `RUN cat` hang pending
+//! Allow/Deny (timeout=Deny). `LIST_DIR` / `READ_FILE` / `RUN ls|pwd` exempt.
+//! Sync invoke **holds until decision/timeout**. See `docs/tool-approval-runbook.md`.
 
 #![allow(dead_code)]
 
@@ -32,6 +36,9 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::tool_approval::{
+    format_pending_summary, ApprovalDecision, ApprovalState, GateOutcome, ToolApprovalMode,
+};
 use crate::{
     is_expired, mint_vnc_descriptor_value, now_ms, AgentRecord, Gateway, GatewayError, RuntimeHint,
     TranscriptEntry, VncMode, VncTokenError, VncTokenRecord, ATTACHMENT_OBJECT_MAX_BYTES,
@@ -184,6 +191,8 @@ struct Shared {
     history_max_turns: usize,
     /// Soft append-only session.jsonl under agent workspace.
     session_persist: bool,
+    /// GA1 tool approval gate.
+    approval: ApprovalState,
 }
 
 /// Box Sidecar gateway: multi-turn + workspace tools + streaming hints + VNC/attach.
@@ -234,7 +243,7 @@ impl BoxSidecarGateway {
                 .as_deref(),
             Some("1") | Some("true") | Some("yes") | Some("on")
         );
-        Self::new_with_options(
+        Self::new_with_approval(
             workspace,
             Duration::from_millis(delay_ms),
             event_url,
@@ -242,6 +251,7 @@ impl BoxSidecarGateway {
             llm,
             history_max_turns,
             session_persist,
+            ToolApprovalMode::from_env_product_default(),
         )
     }
 
@@ -299,6 +309,30 @@ impl BoxSidecarGateway {
         llm: Option<BoxLlmConfig>,
         history_max_turns: usize,
         session_persist: bool,
+    ) -> Self {
+        // In-process / test constructors: unset MODE → off (deepen/resident green).
+        Self::new_with_approval(
+            workspace_root,
+            turn_delay,
+            event_url,
+            event_token,
+            llm,
+            history_max_turns,
+            session_persist,
+            ToolApprovalMode::from_env_test_default(),
+        )
+    }
+
+    /// Product `from_env` path: unset `ATLAS_TOOL_APPROVAL_MODE` → `gate`.
+    pub fn new_with_approval(
+        workspace_root: PathBuf,
+        turn_delay: Duration,
+        event_url: Option<String>,
+        event_token: Option<String>,
+        llm: Option<BoxLlmConfig>,
+        history_max_turns: usize,
+        session_persist: bool,
+        approval_mode: ToolApprovalMode,
     ) -> Self {
         let _ = std::fs::create_dir_all(&workspace_root);
         let (turn_tx, _) = tokio::sync::broadcast::channel(128);
@@ -387,6 +421,11 @@ impl BoxSidecarGateway {
                 llm,
                 history_max_turns: history_max_turns.max(1),
                 session_persist,
+                approval: ApprovalState::new(
+                    approval_mode,
+                    ApprovalState::timeout_from_env(),
+                    ApprovalState::token_from_env(),
+                ),
             }),
         }
     }
@@ -403,6 +442,68 @@ impl BoxSidecarGateway {
 
     pub fn workspace_root(&self) -> &Path {
         &self.shared.workspace_root
+    }
+
+    pub fn tool_approval_mode(&self) -> ToolApprovalMode {
+        self.shared.approval.mode
+    }
+
+    pub fn tool_approval_timeout_ms(&self) -> u64 {
+        self.shared.approval.timeout.as_millis() as u64
+    }
+
+    /// Whether an optional `/approve` token is configured (never returns the secret).
+    pub fn tool_approval_token_configured(&self) -> bool {
+        self.shared.approval.token.is_some()
+    }
+
+    /// Test/CI hook: queue a decision applied to the next gated tool (FIFO).
+    pub fn inject_approval_decision(&self, decision: ApprovalDecision) {
+        if let Ok(mut q) = self.shared.approval.inject.lock() {
+            q.push_back(decision);
+        }
+    }
+
+    /// Resolve a pending approval (in-process or HTTP `/approve`).
+    /// Unknown / already-consumed id → closed reject (never Allow).
+    pub async fn submit_tool_approval(
+        &self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<Value, GatewayError> {
+        let slot = {
+            let mut map = self.shared.approval.pending.write().await;
+            map.remove(approval_id)
+        };
+        let Some(slot) = slot else {
+            return Err(GatewayError::Rejected {
+                reason: "approval_closed".into(),
+                detail: Some("unknown_or_consumed".into()),
+            });
+        };
+        let _ = slot.tx.send(decision);
+        info!(
+            approval_id,
+            decision = decision.as_str(),
+            tool = %slot.tool,
+            agent_id = %slot.agent_id,
+            "GA1 tool approval resolved"
+        );
+        Ok(json!({
+            "ok": true,
+            "approvalId": approval_id,
+            "decision": decision.as_str(),
+            "tool": slot.tool,
+            "agentId": slot.agent_id,
+        }))
+    }
+
+    /// Snapshot pending approval ids (test helper).
+    pub async fn pending_approval_ids(&self) -> Vec<String> {
+        let map = self.shared.approval.pending.read().await;
+        let mut ids: Vec<_> = map.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 
     pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<RuntimeHint> {
@@ -626,7 +727,9 @@ impl BoxSidecarGateway {
     }
 
     /// Run whitelist tools if prompt contains documented triggers.
-    fn maybe_run_tools(&self, agent_id: &str, prompt: &str) -> Option<String> {
+    /// Gated tools (WRITE / RUN mkdir / RUN cat) await approval when mode=gate.
+    /// Sync invoke holds here until Allow/Deny/timeout (documented GA1 choice).
+    async fn maybe_run_tools(&self, agent_id: &str, prompt: &str) -> Option<String> {
         self.ensure_agent_workspace(agent_id);
         let cwd = self.agent_dir(agent_id);
         let mut evidences: Vec<String> = Vec::new();
@@ -705,70 +808,113 @@ impl BoxSidecarGateway {
         }
 
         if let Some((rel, content)) = parse_write_file(prompt) {
-            match resolve_sandbox_path(&cwd, &rel) {
-                Ok(path) => match write_text_capped(&path, &content) {
-                    Ok(n) => {
-                        let summary =
-                            format!("[tool:write_file path={rel} bytes={n}] wrote ok");
-                        self.emit_tool_hint(agent_id, "write_file", &summary, Some(0));
-                        evidences.push(summary);
-                    }
+            let detail = format!("WRITE_FILE {rel}");
+            let outcome = self
+                .await_tool_approval(agent_id, "write_file", &detail)
+                .await;
+            if outcome.is_allow() {
+                match resolve_sandbox_path(&cwd, &rel) {
+                    Ok(path) => match write_text_capped(&path, &content) {
+                        Ok(n) => {
+                            let summary = format!(
+                                "[tool:write_file path={rel} bytes={n} approval=allow] wrote ok"
+                            );
+                            self.emit_tool_hint(agent_id, "write_file", &summary, Some(0));
+                            evidences.push(summary);
+                        }
+                        Err(e) => {
+                            let summary = format!("[tool:write_file error] {e}");
+                            self.emit_tool_hint(agent_id, "write_file", &summary, Some(1));
+                            evidences.push(summary);
+                        }
+                    },
                     Err(e) => {
                         let summary = format!("[tool:write_file error] {e}");
                         self.emit_tool_hint(agent_id, "write_file", &summary, Some(1));
                         evidences.push(summary);
                     }
-                },
-                Err(e) => {
-                    let summary = format!("[tool:write_file error] {e}");
-                    self.emit_tool_hint(agent_id, "write_file", &summary, Some(1));
-                    evidences.push(summary);
                 }
+            } else {
+                let reason = outcome.reason();
+                let summary = format!(
+                    "[tool:write_file path={rel} error] {reason} (no workspace side effect)"
+                );
+                self.emit_tool_hint(agent_id, "write_file", &summary, Some(1));
+                evidences.push(summary);
             }
         }
 
         if let Some(rel) = parse_trigger_path(prompt, TOOL_TRIGGER_RUN_CAT) {
-            match resolve_sandbox_path(&cwd, &rel) {
-                Ok(path) => match read_text_capped(&path) {
-                    Ok(body) => {
-                        let summary =
-                            format!("[tool:shell cmd=cat path={rel}]\n{body}");
-                        self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(0));
-                        evidences.push(summary);
-                    }
+            let detail = format!("RUN cat {rel}");
+            let outcome = self
+                .await_tool_approval(agent_id, "shell_cat", &detail)
+                .await;
+            if outcome.is_allow() {
+                match resolve_sandbox_path(&cwd, &rel) {
+                    Ok(path) => match read_text_capped(&path) {
+                        Ok(body) => {
+                            let summary = format!(
+                                "[tool:shell cmd=cat path={rel} approval=allow]\n{body}"
+                            );
+                            self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(0));
+                            evidences.push(summary);
+                        }
+                        Err(e) => {
+                            let summary = format!("[tool:shell cmd=cat error] {e}");
+                            self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(1));
+                            evidences.push(summary);
+                        }
+                    },
                     Err(e) => {
                         let summary = format!("[tool:shell cmd=cat error] {e}");
                         self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(1));
                         evidences.push(summary);
                     }
-                },
-                Err(e) => {
-                    let summary = format!("[tool:shell cmd=cat error] {e}");
-                    self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(1));
-                    evidences.push(summary);
                 }
+            } else {
+                let reason = outcome.reason();
+                let summary = format!(
+                    "[tool:shell cmd=cat path={rel} error] {reason} (no workspace side effect)"
+                );
+                self.emit_tool_hint(agent_id, "shell_cat", &summary, Some(1));
+                evidences.push(summary);
             }
         }
 
         if let Some(rel) = parse_trigger_path(prompt, TOOL_TRIGGER_RUN_MKDIR) {
-            match resolve_sandbox_path(&cwd, &rel) {
-                Ok(path) => match std::fs::create_dir_all(&path) {
-                    Ok(()) => {
-                        let summary = format!("[tool:shell cmd=mkdir path={rel}] ok");
-                        self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(0));
-                        evidences.push(summary);
-                    }
+            let detail = format!("RUN mkdir {rel}");
+            let outcome = self
+                .await_tool_approval(agent_id, "shell_mkdir", &detail)
+                .await;
+            if outcome.is_allow() {
+                match resolve_sandbox_path(&cwd, &rel) {
+                    Ok(path) => match std::fs::create_dir_all(&path) {
+                        Ok(()) => {
+                            let summary = format!(
+                                "[tool:shell cmd=mkdir path={rel} approval=allow] ok"
+                            );
+                            self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(0));
+                            evidences.push(summary);
+                        }
+                        Err(e) => {
+                            let summary = format!("[tool:shell cmd=mkdir error] {e}");
+                            self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(1));
+                            evidences.push(summary);
+                        }
+                    },
                     Err(e) => {
                         let summary = format!("[tool:shell cmd=mkdir error] {e}");
                         self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(1));
                         evidences.push(summary);
                     }
-                },
-                Err(e) => {
-                    let summary = format!("[tool:shell cmd=mkdir error] {e}");
-                    self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(1));
-                    evidences.push(summary);
                 }
+            } else {
+                let reason = outcome.reason();
+                let summary = format!(
+                    "[tool:shell cmd=mkdir path={rel} error] {reason} (no workspace side effect)"
+                );
+                self.emit_tool_hint(agent_id, "shell_mkdir", &summary, Some(1));
+                evidences.push(summary);
             }
         }
 
@@ -787,6 +933,83 @@ impl BoxSidecarGateway {
             Some(evidences.join("\n"))
         }
     }
+
+    /// Gate a dangerous tool. Failures / unknown errors → Deny (never Allow).
+    async fn await_tool_approval(
+        &self,
+        agent_id: &str,
+        tool: &str,
+        detail: &str,
+    ) -> GateOutcome {
+        match self.shared.approval.mode {
+            ToolApprovalMode::Off => return GateOutcome::Allow,
+            ToolApprovalMode::AutoDeny => {
+                info!(%agent_id, %tool, "GA1 auto_deny");
+                return GateOutcome::AutoDeny;
+            }
+            ToolApprovalMode::Gate => {}
+        }
+
+        // Injected test decisions (FIFO) — applied before hang.
+        if let Ok(mut q) = self.shared.approval.inject.lock() {
+            if let Some(d) = q.pop_front() {
+                return match d {
+                    ApprovalDecision::Allow => GateOutcome::Allow,
+                    ApprovalDecision::Deny => GateOutcome::Deny,
+                };
+            }
+        }
+
+        let approval_id = format!("appr_{}", Uuid::new_v4().simple());
+        let (tx, rx) = oneshot::channel::<ApprovalDecision>();
+        {
+            let mut map = self.shared.approval.pending.write().await;
+            map.insert(
+                approval_id.clone(),
+                crate::tool_approval::PendingApprovalSlot {
+                    agent_id: agent_id.to_string(),
+                    tool: tool.to_string(),
+                    summary: detail.to_string(),
+                    tx,
+                },
+            );
+        }
+
+        // GA1b: thin reuse of hub:tool with documented pending prefix (exitCode null).
+        let pending_summary = format_pending_summary(&approval_id, tool, detail);
+        self.emit_tool_hint(agent_id, "approval_pending", &pending_summary, None);
+        info!(%agent_id, %tool, %approval_id, "GA1 approval pending");
+
+        let timeout = self.shared.approval.timeout;
+        let outcome = tokio::select! {
+            res = rx => match res {
+                Ok(ApprovalDecision::Allow) => GateOutcome::Allow,
+                Ok(ApprovalDecision::Deny) => GateOutcome::Deny,
+                // Sender dropped without decision → Deny (never Allow).
+                Err(_) => {
+                    warn!(%approval_id, "GA1 approval channel closed; denying");
+                    GateOutcome::Deny
+                }
+            },
+            _ = tokio::time::sleep(timeout) => GateOutcome::Timeout,
+        };
+
+        // Ensure pending slot is cleared on timeout / channel close.
+        {
+            let mut map = self.shared.approval.pending.write().await;
+            map.remove(&approval_id);
+        }
+
+        info!(
+            %agent_id,
+            %tool,
+            %approval_id,
+            outcome = outcome.reason(),
+            "GA1 approval settled"
+        );
+        outcome
+    }
+
 
     /// Build non-echo reply that references prior turn context when present.
     fn compose_reply(
@@ -1043,7 +1266,7 @@ impl BoxSidecarGateway {
 
         // Tool-vs-LLM order: tools first; tool evidence → compose_reply;
         // pure chat → LLM when configured, else compose_reply.
-        let tool_evidence = self.maybe_run_tools(agent_id, &prompt);
+        let tool_evidence = self.maybe_run_tools(agent_id, &prompt).await;
 
         let reply = if tool_evidence.is_some() {
             let _ = cancel_rx; // tools path: cancel already survived delay
@@ -1353,6 +1576,26 @@ impl Gateway for BoxSidecarGateway {
         info!(%agent_id, "box sidecar vnc_descriptor");
         self.mint_vnc_descriptor(agent_id).await
     }
+
+    async fn tool_approve(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<Value, GatewayError> {
+        let Some(d) = ApprovalDecision::parse(decision) else {
+            return Err(GatewayError::InvalidArgs(
+                "decision must be allow|deny".into(),
+            ));
+        };
+        self.submit_tool_approval(approval_id, d).await
+    }
+
+    fn tool_approval_info(&self) -> Option<(String, bool)> {
+        Some((
+            self.shared.approval.mode.as_str().to_string(),
+            self.shared.approval.token.is_some(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -1367,6 +1610,18 @@ impl Gateway for Arc<BoxSidecarGateway> {
 
     async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
         (**self).vnc_descriptor(agent_id).await
+    }
+
+    async fn tool_approve(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<Value, GatewayError> {
+        (**self).tool_approve(approval_id, decision).await
+    }
+
+    fn tool_approval_info(&self) -> Option<(String, bool)> {
+        (**self).tool_approval_info()
     }
 }
 

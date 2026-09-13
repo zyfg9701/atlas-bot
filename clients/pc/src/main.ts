@@ -61,6 +61,14 @@ app.innerHTML = `
       <label for="tokenPaste">Bearer</label>
       <input id="tokenPaste" placeholder="optional paste token (dev) or after Login" />
     </div>
+    <div class="row">
+      <label for="gwHttpBase">Gateway HTTP</label>
+      <input id="gwHttpBase" placeholder="http://127.0.0.1:8787" title="GA1 /approve base (loopback)" />
+    </div>
+    <div class="row">
+      <label for="gwApproveToken">Approval token</label>
+      <input id="gwApproveToken" placeholder="optional ATLAS_TOOL_APPROVAL_TOKEN" />
+    </div>
     <div class="mono" id="authOut">auth: (none) · Tauri Bearer WS for production oidc/static</div>
   </details>
 
@@ -82,6 +90,7 @@ app.innerHTML = `
     <section class="chat-pane panel">
       <h2>Conversation</h2>
       <div id="conversation" class="conversation mono" aria-live="polite"></div>
+      <div id="approvalCard" class="approval-card" hidden></div>
       <div class="composer">
         <textarea id="prompt" placeholder="Write a prompt…" rows="3">hello U1</textarea>
         <div class="composer-actions">
@@ -201,6 +210,97 @@ const logEl = $("log");
 const eventsEl = $("events");
 const transcriptEl = $("transcript");
 const conversationEl = $("conversation");
+const approvalCardEl = $("approvalCard") as HTMLDivElement;
+const gwHttpBaseEl = $("gwHttpBase") as HTMLInputElement;
+const gwApproveTokenEl = $("gwApproveToken") as HTMLInputElement;
+
+const DEFAULT_GW_HTTP = "http://127.0.0.1:8787";
+try {
+  gwHttpBaseEl.value = localStorage.getItem("atlas-pc-gw-http") || DEFAULT_GW_HTTP;
+} catch {
+  gwHttpBaseEl.value = DEFAULT_GW_HTTP;
+}
+gwHttpBaseEl.addEventListener("change", () => {
+  try {
+    localStorage.setItem("atlas-pc-gw-http", gwHttpBaseEl.value.trim() || DEFAULT_GW_HTTP);
+  } catch {
+    /* ignore */
+  }
+});
+
+type PendingApproval = { approvalId: string; tool: string; summary: string; agentId: string };
+const pendingApprovals = new Map<string, PendingApproval>();
+
+function parseApprovalPending(summary: string): { approvalId: string; tool: string } | null {
+  // [approval_pending approvalId=… tool=…] …
+  const m = summary.match(
+    /^\[approval_pending\s+approvalId=([^\s\]]+)\s+tool=([^\]]+)\]/,
+  );
+  if (!m) return null;
+  return { approvalId: m[1], tool: m[2].trim() };
+}
+
+function renderApprovalCard() {
+  const aid = currentAgentId();
+  const mine = [...pendingApprovals.values()].filter((p) => p.agentId === aid);
+  if (!mine.length) {
+    approvalCardEl.hidden = true;
+    approvalCardEl.innerHTML = "";
+    return;
+  }
+  const p = mine[mine.length - 1];
+  approvalCardEl.hidden = false;
+  approvalCardEl.innerHTML = "";
+  const title = document.createElement("div");
+  title.className = "approval-title";
+  title.textContent = `待审批 · ${p.tool}`;
+  const body = document.createElement("div");
+  body.className = "approval-body mono";
+  body.textContent = p.summary;
+  const actions = document.createElement("div");
+  actions.className = "approval-actions";
+  const allowBtn = document.createElement("button");
+  allowBtn.type = "button";
+  allowBtn.textContent = "Allow";
+  allowBtn.onclick = () => void postApproval(p.approvalId, "allow");
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "secondary";
+  denyBtn.textContent = "Deny";
+  denyBtn.onclick = () => void postApproval(p.approvalId, "deny");
+  actions.append(allowBtn, denyBtn);
+  approvalCardEl.append(title, body, actions);
+}
+
+async function postApproval(approvalId: string, decision: "allow" | "deny") {
+  const base = (gwHttpBaseEl.value || DEFAULT_GW_HTTP).trim().replace(/\/$/, "");
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const tok = gwApproveTokenEl.value.trim();
+  if (tok) {
+    headers.Authorization = `Bearer ${tok}`;
+    headers["X-Atlas-Approval-Token"] = tok;
+  }
+  try {
+    const resp = await fetch(`${base}/approve`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ approvalId, decision }),
+    });
+    const text = await resp.text();
+    appendLog(
+      resp.ok ? "info" : "warn",
+      `GA1 /approve ${decision} ${resp.status}`,
+      text,
+    );
+    if (resp.ok || resp.status === 409) {
+      pendingApprovals.delete(approvalId);
+      renderApprovalCard();
+    }
+  } catch (e) {
+    appendLog("warn", `GA1 /approve failed: ${(e as Error).message || e}`);
+  }
+}
+
 const offboxEl = $("offbox");
 const offboxCursorEl = $("offboxCursor");
 const listOut = $("listOut");
@@ -464,6 +564,23 @@ function ensureClient(): HubClient {
         if (ev.agentId !== currentAgentId()) {
           appendLog("event", `event for other agent ${ev.agentId} (not mixed into current view)`);
           return;
+        }
+        if (ev.channel === "hub:tool") {
+          const summary =
+            typeof ev.event === "object" && ev.event && "summary" in (ev.event as object)
+              ? String((ev.event as { summary?: unknown }).summary ?? "")
+              : "";
+          const parsed = parseApprovalPending(summary);
+          if (parsed) {
+            pendingApprovals.set(parsed.approvalId, {
+              approvalId: parsed.approvalId,
+              tool: parsed.tool,
+              summary,
+              agentId: ev.agentId,
+            });
+            renderApprovalCard();
+            appendLog("event", `GA1 approval pending ${parsed.approvalId}`);
+          }
         }
         if (ev.channel === "hub:turn_finished") {
           appendLog("event", "turn finished — fetching transcript tail");

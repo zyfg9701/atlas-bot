@@ -4,7 +4,7 @@
 > 基线：P3.5 `CliAgentGateway` · 打磨 C1/C1b  
 > 旁路（stub / box / openai）见下文对照表；协议细节仍见 [`P3.5-runbook.md`](./P3.5-runbook.md)。
 
-> **默认仍 cli；box 旁路（可选 LLM）见 [`private-resident-runtime-runbook.md`](./private-resident-runtime-runbook.md)。** 真模型黄标证据包（RL1）：同 runbook § 真模型黄标 · [`rr1-live-llm-handtest-checklist.md`](./rr1-live-llm-handtest-checklist.md)。
+> **默认仍 cli；box 旁路（可选 LLM）见 [`private-resident-runtime-runbook.md`](./private-resident-runtime-runbook.md)。** Box 审批闸见 [`tool-approval-runbook.md`](./tool-approval-runbook.md)（GA1；默认仍 cli；非 GA2/cli 闸）。 真模型黄标证据包（RL1）：同 runbook § 真模型黄标 · [`rr1-live-llm-handtest-checklist.md`](./rr1-live-llm-handtest-checklist.md)。
 
 
 > **Dev vs dist:** 开发用仓库内 `cargo run` / `scripts/dev-cli-stack.*`；分发用 `dist/` 二进制 + `dist/scripts/start-cli-stack.*`（见 [`packaging-skeleton.md`](./packaging-skeleton.md)）。本页默认描述 **开发主路径**。
