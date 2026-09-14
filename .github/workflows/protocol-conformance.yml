@@ -24,6 +24,8 @@ jobs:
         run: cargo test -p atlas-bot-hub --test p5_smoke -- --nocapture --test-threads=1
       - name: P5 real smoke (disk + vnc proxy mock)
         run: cargo test -p atlas-bot-hub --test p5r_smoke -- --nocapture --test-threads=1
+      - name: P1 desktop smoke (degrade + mock RFB; real Xvfb skip if missing)
+        run: cargo test -p atlas-bot-hub --test p1_desktop_smoke -- --nocapture --test-threads=1
       - name: P6 smoke
         run: cargo test -p atlas-bot-cli --test p6_smoke -- --nocapture --test-threads=1
       - name: α ACP adapter smoke

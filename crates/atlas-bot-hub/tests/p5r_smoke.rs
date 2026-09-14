@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_bot_gateway::{
-    AttachMode, GatewayConfig, InMemoryGateway, VncMode, UPLOAD_ARGS_JSON_MAX_BYTES,
+    spawn_loopback_mock_rfb, AttachMode, GatewayConfig, InMemoryGateway, VncMode,
+    UPLOAD_ARGS_JSON_MAX_BYTES,
 };
 use atlas_bot_hub::{Hub, Session};
 use serde_json::{json, Value};
@@ -142,14 +143,15 @@ async fn p5r_smoke_attach_disk_and_vnc_proxy() {
         attach_root.display()
     );
 
-    // --- VNC proxy with mock upstream ---
+    // --- VNC proxy with probed RFB upstream (D1: mint only if probe healthy) ---
+    let (_rfb_h, rfb_up) = spawn_loopback_mock_rfb().await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let public_base = format!("http://{addr}");
     let proxy_cfg = GatewayConfig {
         turn_delay: Duration::from_millis(50),
         vnc_mode: VncMode::Proxy,
-        vnc_upstream: Some("127.0.0.1:5900".into()),
+        vnc_upstream: Some(rfb_up.clone()),
         vnc_public_base: public_base.clone(),
         attach_mode: AttachMode::Memory,
         ..GatewayConfig::default()
@@ -193,8 +195,15 @@ async fn p5r_smoke_attach_disk_and_vnc_proxy() {
     let resp = reqwest::get(&local).await.unwrap();
     assert_eq!(resp.status(), 200);
     let html = resp.text().await.unwrap();
-    assert!(html.contains("proxy-mock") || html.contains("P5 VNC proxy"), "{html}");
-    assert!(html.contains("127.0.0.1:5900"), "{html}");
+    assert!(
+        html.contains("proxy-rfb") || html.contains("probed OK") || html.contains("P5 VNC proxy"),
+        "{html}"
+    );
+    assert!(html.contains(&rfb_up), "{html}");
+    assert!(
+        !html.contains("已连接真桌面"),
+        "must not falsely claim connected desktop: {html}"
+    );
 
     // Expired / unknown token → 403/410
     let bad = reqwest::get(format!("http://{addr}/vnc/tok_deadbeef/"))
@@ -206,7 +215,7 @@ async fn p5r_smoke_attach_disk_and_vnc_proxy() {
         bad.status()
     );
 
-    println!("SMOKE_OK p5r vnc-proxy url={vnc_url} mock-upstream=127.0.0.1:5900");
+    println!("SMOKE_OK p5r vnc-proxy url={vnc_url} rfb-upstream={rfb_up}");
 
     // --- proxy without upstream → stub degrade ---
     let degrade_cfg = GatewayConfig {

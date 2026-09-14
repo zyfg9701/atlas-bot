@@ -48,6 +48,9 @@ Optional operator components (not vendored)
 
 noVNC / websockify are NOT vendored in this repository for P5 实装.
 Operators may run a separate Docker noVNC image against ATLAS_VNC_UPSTREAM
-(see docs/P5-real-runbook.md). If a future change vendors those trees,
-add license entries here before merge.
+(see docs/P5-real-runbook.md and docs/p1-desktop-runbook.md). If a future
+change vendors those trees, add license entries here before merge.
+
+Xvfb and x11vnc are system packages for the D1 same-machine display stack
+(scripts/atlas-desktop-stack.sh). They are not vendored in this repository.
 

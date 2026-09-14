@@ -43,9 +43,13 @@ RUST_LOG=info cargo run -p atlas-bot-hub
 # gateway HTTP (loopback): http://127.0.0.1:8787/
 ```
 
-With upstream set, `bot.vncDescriptor` mints `http://127.0.0.1:8787/vnc/{token}/`
-(short TTL ≈ 5 minutes). The built-in page is a **proxy mock** documenting the
-upstream — enough for Evidence. Full noVNC + websockify is **not** vendored.
+With upstream set **and RFB probe healthy**, `bot.vncDescriptor` mints
+`http://127.0.0.1:8787/vnc/{token}/` (short TTL ≈ 5 minutes). Probe failure
+degrades to the stub page (never claims a live desktop). The token page is a
+**gate**, not the framebuffer — D1 Evidence is RFB handshake / screenshot, not
+mock HTML. Full noVNC + websockify is **not** vendored.
+
+Same-machine real display (Xvfb+x11vnc): see [p1-desktop-runbook.md](./p1-desktop-runbook.md).
 
 ### Optional: full noVNC via Docker
 
@@ -87,9 +91,9 @@ docker run --rm --network host \
 
 ## Known limitations (checklist §6)
 
-- **VNC:** proxy Evidence is the built-in mock HTML when upstream is set; full
-  noVNC is a Docker/operator option, not embedded. Without `ATLAS_VNC_UPSTREAM`,
-  proxy mode degrades to the same stub page as today.
+- **VNC:** D1 probes RFB before minting a token URL; unhealthy / missing
+  upstream → stub. Mock HTML is **not** desktop Evidence (see p1-desktop-runbook).
+  Full noVNC remains a Docker/operator option, not embedded.
 - **Attachments:** TTL swept on upload/attach (lazy); disk mode persists across
   gateway restart via `meta.json`. Memory mode keeps in-process map (CI).
 - **`readAttachment*`:** not in scope for P5 实装.

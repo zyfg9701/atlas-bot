@@ -40,7 +40,7 @@ use crate::tool_approval::{
     format_pending_summary, ApprovalDecision, ApprovalState, GateOutcome, ToolApprovalMode,
 };
 use crate::{
-    is_expired, mint_vnc_descriptor_value, now_ms, AgentRecord, Gateway, GatewayError, RuntimeHint,
+    is_expired, mint_vnc_descriptor_probed, now_ms, AgentRecord, Gateway, GatewayError, RuntimeHint,
     TranscriptEntry, VncMode, VncTokenError, VncTokenRecord, ATTACHMENT_OBJECT_MAX_BYTES,
     BOX_TEXT_FILE_MAX_BYTES, DEFAULT_AGENT_ID, DEFAULT_AGENT_NAME, DEFAULT_ATTACH_TTL_SECS,
     DEFAULT_VNC_STUB_BASE, ENV_ATTACH_TTL_SECS, ENV_VNC_MODE, ENV_VNC_UPSTREAM,
@@ -1410,14 +1410,14 @@ impl BoxSidecarGateway {
     }
 
     async fn mint_vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
-        let mut tokens = self.shared.vnc_tokens.write().await;
-        mint_vnc_descriptor_value(
+        mint_vnc_descriptor_probed(
             agent_id,
             &self.shared.vnc_stub_base,
             self.shared.vnc_mode,
             self.shared.vnc_upstream.as_deref(),
-            Some(&mut tokens),
+            &self.shared.vnc_tokens,
         )
+        .await
     }
 
     async fn upload_attachment(
@@ -1577,6 +1577,10 @@ impl Gateway for BoxSidecarGateway {
         self.mint_vnc_descriptor(agent_id).await
     }
 
+    async fn lookup_vnc_token(&self, token: &str) -> Result<VncTokenRecord, VncTokenError> {
+        BoxSidecarGateway::lookup_vnc_token(self, token).await
+    }
+
     async fn tool_approve(
         &self,
         approval_id: &str,
@@ -1610,6 +1614,10 @@ impl Gateway for Arc<BoxSidecarGateway> {
 
     async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
         (**self).vnc_descriptor(agent_id).await
+    }
+
+    async fn lookup_vnc_token(&self, token: &str) -> Result<VncTokenRecord, VncTokenError> {
+        (**self).lookup_vnc_token(token).await
     }
 
     async fn tool_approve(

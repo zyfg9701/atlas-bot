@@ -40,7 +40,7 @@ so mid-turn `hub:tool` / `hub:assistant_delta` reach subscribers. See
 | `ATLAS_BOX_WORKSPACE` | Box root (default `./data/box-workspace`); agent dir `<root>/<agentId>/` |
 | `ATLAS_BOX_TURN_DELAY_MS` | Interruptible sendPrompt delay (default `50`) |
 | `ATLAS_VNC_MODE` | `stub` (default) \| `proxy` |
-| `ATLAS_VNC_UPSTREAM` | Optional `host:port`; absent → stub page (never fake desktop) |
+| `ATLAS_VNC_UPSTREAM` | Optional `host:port`; absent **or RFB probe fail** → stub page (never fake desktop). D1: see `docs/p1-desktop-runbook.md` |
 | `ATLAS_VNC_STUB_BASE` | Public base for minted URLs (default `http://127.0.0.1:8787`) |
 | `ATLAS_ATTACH_TTL_SECS` | Attachment TTL (default 24h); Box stores under workspace |
 | `ATLAS_GATEWAY_URL` | Hub → remote gateway (pair with B1 `ATLAS_HUB_EVENT_URL` for mid-turn) |
@@ -131,8 +131,9 @@ Also keep green: `runtime_smoke`, `p35_smoke`, `p5_smoke`, `p5r_smoke`,
    with files rooted under the agent workspace (`…/uploads/`).
 4. **Model:** Deterministic local responder (history + tool evidence). Not an LLM;
    not grok-build.
-5. **VNC:** Stub-only without `ATLAS_VNC_UPSTREAM`; proxy token URL when
-   `ATLAS_VNC_MODE=proxy` + upstream set (same P5 mock page semantics).
+5. **VNC:** Stub-only without `ATLAS_VNC_UPSTREAM` **or** when RFB probe fails;
+   proxy token URL when `ATLAS_VNC_MODE=proxy` + upstream **healthy** (D1).
+   Mock HTML is not desktop Evidence; see `docs/p1-desktop-runbook.md`.
 
 ## Out of scope (R2)
 

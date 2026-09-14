@@ -12,9 +12,11 @@
 //!
 //! VNC is **not** a command name: Hub calls [`Gateway::vnc_descriptor`] for
 //! `bot.vncDescriptor`. Modes: `ATLAS_VNC_MODE=stub|proxy` (default stub);
-//! `ATLAS_ATTACH_MODE=memory|disk` (default memory). Proxy without
-//! `ATLAS_VNC_UPSTREAM` degrades to the stub page. Disk mode persists under
-//! `ATLAS_ATTACH_ROOT` with TTL metadata.
+//! `ATLAS_ATTACH_MODE=memory|disk` (default memory). Proxy mints a token URL
+//! only after an RFB probe of `ATLAS_VNC_UPSTREAM` succeeds; otherwise
+//! **degrade-to-stub** (never claims a live desktop). Disk mode persists under
+//! `ATLAS_ATTACH_ROOT` with TTL metadata. D1 display stack: Xvfb+x11vnc
+//! (`scripts/atlas-desktop-stack.sh`, `docs/p1-desktop-runbook.md`).
 
 #![forbid(unsafe_code)]
 
@@ -22,6 +24,7 @@ pub mod box_sidecar;
 pub mod cli_gateway;
 pub mod openai_gateway;
 pub mod tool_approval;
+pub mod vnc;
 
 pub use box_sidecar::{
     BoxLlmConfig, BoxSidecarGateway, DEFAULT_BOX_HISTORY_MAX_TURNS, DEFAULT_BOX_LLM_TIMEOUT_MS,
@@ -35,6 +38,11 @@ pub use tool_approval::{
     classify_cli_tool, ApprovalDecision, CliToolGateClass, ToolApprovalMode, APPROVAL_PENDING_PREFIX,
     DEFAULT_TOOL_APPROVAL_TIMEOUT_MS, ENV_TOOL_APPROVAL_MODE, ENV_TOOL_APPROVAL_TIMEOUT_MS,
     ENV_TOOL_APPROVAL_TOKEN, REASON_AUTO_DENY, REASON_DENIED, REASON_TIMEOUT,
+};
+pub use vnc::{
+    mint_vnc_descriptor_probed, mint_vnc_descriptor_value, parse_vnc_upstream, probe_rfb_upstream,
+    rfb_handshake_none, spawn_loopback_mock_rfb, RfbProbe, DEFAULT_VNC_PROBE_TIMEOUT_MS,
+    ENV_VNC_PROBE_TIMEOUT_MS,
 };
 pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_STREAM, ENV_AGENT_CLI_TIMEOUT_MS};
 pub use openai_gateway::{
@@ -233,6 +241,12 @@ pub trait Gateway: Send + Sync {
         Err(GatewayError::UnknownMethod("vncDescriptor".into()))
     }
 
+    /// Resolve a minted `/vnc/{token}/` (D1 / P5r). Default: unknown token.
+    async fn lookup_vnc_token(&self, token: &str) -> Result<VncTokenRecord, VncTokenError> {
+        let _ = token;
+        Err(VncTokenError::Unknown)
+    }
+
     /// GA1: resolve a pending tool approval (`POST /approve`). Default: unsupported.
     async fn tool_approve(
         &self,
@@ -323,6 +337,8 @@ pub struct VncTokenRecord {
     pub agent_id: String,
     pub expires_at_ms: i64,
     pub upstream: String,
+    /// RFB version banner captured at probe (e.g. `003.008`).
+    pub rfb_version: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -964,14 +980,14 @@ impl InMemoryGateway {
     }
 
     async fn mint_vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
-        let mut tokens = self.shared.vnc_tokens.write().await;
-        mint_vnc_descriptor_value(
+        crate::vnc::mint_vnc_descriptor_probed(
             agent_id,
             &self.shared.vnc_stub_base,
             self.shared.vnc_mode,
             self.shared.vnc_upstream.as_deref(),
-            Some(&mut tokens),
+            &self.shared.vnc_tokens,
         )
+        .await
     }
 
     /// Resolve a minted VNC proxy token for HTTP handlers.
@@ -1056,45 +1072,6 @@ pub fn urlencoding_lite(s: &str) -> String {
     out
 }
 
-/// Shared VNC descriptor mint (P5 + R2 Box). When `proxy` mode has an upstream
-/// and `tokens` is provided, a short-lived token URL is minted; otherwise stub.
-pub fn mint_vnc_descriptor_value(
-    agent_id: &str,
-    public_base: &str,
-    vnc_mode: VncMode,
-    vnc_upstream: Option<&str>,
-    tokens: Option<&mut HashMap<String, VncTokenRecord>>,
-) -> Result<Value, GatewayError> {
-    if agent_id.trim().is_empty() {
-        return Err(GatewayError::InvalidArgs("missing agentId".into()));
-    }
-    let base = public_base.trim_end_matches('/');
-    let expires_hint = now_ms() + DEFAULT_VNC_TOKEN_TTL_MS;
-    let use_proxy = vnc_mode == VncMode::Proxy && vnc_upstream.is_some() && tokens.is_some();
-    let vnc_url = if use_proxy {
-        let upstream = vnc_upstream.unwrap().to_string();
-        let token = format!("tok_{}", Uuid::new_v4().simple());
-        if let Some(map) = tokens {
-            map.retain(|_, t| t.expires_at_ms > now_ms());
-            map.insert(
-                token.clone(),
-                VncTokenRecord {
-                    agent_id: agent_id.to_string(),
-                    expires_at_ms: expires_hint,
-                    upstream,
-                },
-            );
-        }
-        format!("{base}/vnc/{token}/")
-    } else {
-        // stub mode, or proxy without upstream → stub page (never claim real desktop)
-        format!("{base}/vnc-stub?agent={}", urlencoding_lite(agent_id))
-    };
-    Ok(json!({
-        "vncUrl": vnc_url,
-        "expiresHint": expires_hint,
-    }))
-}
 
 
 
@@ -1115,6 +1092,10 @@ impl Gateway for InMemoryGateway {
         info!(%agent_id, "gateway vnc_descriptor");
         self.mint_vnc_descriptor(agent_id).await
     }
+
+    async fn lookup_vnc_token(&self, token: &str) -> Result<VncTokenRecord, VncTokenError> {
+        InMemoryGateway::lookup_vnc_token(self, token).await
+    }
 }
 
 #[async_trait]
@@ -1129,6 +1110,10 @@ impl Gateway for Arc<InMemoryGateway> {
 
     async fn vnc_descriptor(&self, agent_id: &str) -> Result<Value, GatewayError> {
         (**self).vnc_descriptor(agent_id).await
+    }
+
+    async fn lookup_vnc_token(&self, token: &str) -> Result<VncTokenRecord, VncTokenError> {
+        (**self).lookup_vnc_token(token).await
     }
 }
 
@@ -1190,26 +1175,34 @@ code{{background:#1a2332;padding:2px 6px;border-radius:4px}}</style></head>
 <body>
 <h1>P5 VNC placeholder</h1>
 <p>Agent: <code>{agent}</code></p>
-<p>This is a short-lived stub page — not a real noVNC session.</p>
+<p data-atlas-vnc="stub">degrade-to-stub — display stack not ready / probe failed / no upstream.
+This page is <strong>not connected to a real desktop</strong>（未连接真桌面）.
+Re-click Open desktop after starting Xvfb+x11vnc (docs/p1-desktop-runbook.md).</p>
+<p>This is a short-lived stub page — not a real noVNC session. atlas-bot does
+not inject key/mouse; there is no extra bot.command for desktop input.</p>
 </body></html>"#
     )
 }
 
-fn vnc_proxy_mock_html(agent: &str, upstream: &str, token: &str) -> String {
+fn vnc_proxy_rfb_html(agent: &str, upstream: &str, token: &str, rfb_version: &str) -> String {
     format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>atlas-bot VNC proxy</title>
 <style>body{{font-family:system-ui;background:#0f1419;color:#e7ecf3;padding:24px}}
 code{{background:#1a2332;padding:2px 6px;border-radius:4px}}</style></head>
 <body>
-<h1>P5 VNC proxy (mock)</h1>
+<h1>D1 VNC proxy (RFB probed)</h1>
 <p>Agent: <code>{agent}</code></p>
-<p>Upstream RFB: <code>{upstream}</code></p>
-<p>Token: <code>{token}</code></p>
-<p>This page documents a tokenized proxy session. Full noVNC + websockify is
-optional (see docs/P5-real-runbook.md / Docker). Evidence path for CI is this
-200 OK mock — not a live desktop framebuffer.</p>
-<p data-atlas-vnc="proxy-mock" data-upstream="{upstream}">proxy-mock upstream={upstream}</p>
+<p>Upstream RFB: <code>{upstream}</code> version <code>{rfb_version}</code></p>
+<p>Token: <code>{token}</code> (TTL ≈ 5 min; unknown/expired → 403/410)</p>
+<p data-atlas-vnc="proxy-rfb" data-upstream="{upstream}" data-rfb-version="{rfb_version}">
+upstream RFB probed OK — this HTML is a <em>token gate</em>, not the framebuffer.
+Connect a VNC client (or optional operator noVNC) to the loopback upstream.
+atlas-bot does <strong>not</strong> inject key/mouse and adds no bot.command
+for input. Mock-only HTML is not desktop Evidence — see docs/p1-desktop-runbook.md.
+</p>
+<p>Workspace (box): default directory inside the display is
+<code>ATLAS_BOX_WORKSPACE/&lt;agentId&gt;/</code> when backend=box.</p>
 </body></html>"#
     )
 }
@@ -1225,7 +1218,10 @@ async fn http_vnc_proxy(
 ) -> Response {
     let token = token.trim_end_matches('/').to_string();
     match st.gw.lookup_vnc_token(&token).await {
-        Ok(rec) => Html(vnc_proxy_mock_html(&rec.agent_id, &rec.upstream, &token)).into_response(),
+        Ok(rec) => {
+            let ver = rec.rfb_version.as_deref().unwrap_or("unknown");
+            Html(vnc_proxy_rfb_html(&rec.agent_id, &rec.upstream, &token, ver)).into_response()
+        }
         Err(VncTokenError::Expired) => (StatusCode::GONE, "vnc token expired").into_response(),
         Err(VncTokenError::Unknown) => (StatusCode::FORBIDDEN, "vnc token unknown").into_response(),
     }
@@ -1515,11 +1511,28 @@ pub fn gateway_http_router(gw: Arc<dyn Gateway>) -> Router {
 }
 
 /// Like [`gateway_http_router`] but with observability metadata on `/healthz` + `/stats`.
+async fn http_vnc_proxy_dyn(
+    State(st): State<DynHttpState>,
+    AxumPath(token): AxumPath<String>,
+) -> Response {
+    let token = token.trim_end_matches('/').to_string();
+    match st.gw.lookup_vnc_token(&token).await {
+        Ok(rec) => {
+            let ver = rec.rfb_version.as_deref().unwrap_or("unknown");
+            Html(vnc_proxy_rfb_html(&rec.agent_id, &rec.upstream, &token, ver)).into_response()
+        }
+        Err(VncTokenError::Expired) => (StatusCode::GONE, "vnc token expired").into_response(),
+        Err(VncTokenError::Unknown) => (StatusCode::FORBIDDEN, "vnc token unknown").into_response(),
+    }
+}
+
 pub fn gateway_http_router_with_meta(gw: Arc<dyn Gateway>, meta: GatewayHttpMeta) -> Router {
     Router::new()
         .route("/invoke", post(http_invoke_dyn))
         .route("/vnc-descriptor", post(http_vnc_descriptor_dyn))
         .route("/vnc-stub", get(http_vnc_stub))
+        .route("/vnc/{token}/", get(http_vnc_proxy_dyn))
+        .route("/vnc/{token}", get(http_vnc_proxy_dyn))
         .route("/healthz", get(http_healthz_dyn))
         .route("/stats", get(http_stats_dyn))
         .route("/approve", post(http_approve_dyn))
@@ -1896,10 +1909,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vnc_proxy_mints_token_url_with_upstream() {
+    async fn vnc_proxy_mints_token_url_with_healthy_upstream() {
+        let (_h, up) = spawn_loopback_mock_rfb().await.unwrap();
         let cfg = GatewayConfig {
             vnc_mode: VncMode::Proxy,
-            vnc_upstream: Some("127.0.0.1:5900".into()),
+            vnc_upstream: Some(up),
             vnc_public_base: "http://127.0.0.1:8787".into(),
             turn_delay: Duration::from_millis(10),
             ..GatewayConfig::default()
@@ -1924,6 +1938,24 @@ mod tests {
         let v = gw.vnc_descriptor("agt_1").await.unwrap();
         let url = v["vncUrl"].as_str().unwrap();
         assert!(url.contains("/vnc-stub?agent=agt_1"), "{url}");
+    }
+
+    #[tokio::test]
+    async fn vnc_proxy_unhealthy_upstream_degrades_to_stub() {
+        let cfg = GatewayConfig {
+            vnc_mode: VncMode::Proxy,
+            vnc_upstream: Some("127.0.0.1:1".into()),
+            vnc_public_base: "http://127.0.0.1:8787".into(),
+            turn_delay: Duration::from_millis(10),
+            ..GatewayConfig::default()
+        };
+        let gw = InMemoryGateway::with_config(cfg);
+        let v = gw.vnc_descriptor("agt_1").await.unwrap();
+        let url = v["vncUrl"].as_str().unwrap();
+        assert!(
+            url.contains("/vnc-stub?agent=agt_1"),
+            "unhealthy probe must not mint token URL, got {url}"
+        );
     }
 
     #[test]
