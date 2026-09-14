@@ -63,7 +63,9 @@ cargo run -p atlas-bot-hub
 ```
 
 P5 VNC/attachments: see [`docs/P5-runbook.md`](./docs/P5-runbook.md).
+P1 desktop (D1, Xvfb+x11vnc): [`docs/p1-desktop-runbook.md`](./docs/p1-desktop-runbook.md).
 
 ## Out of scope (P5)
 
-Real noVNC cluster, IdP, groups/channels, `readAttachment*`, production/store installers (P1 is dist+scripts skeleton only — see packaging-skeleton), vendor grok runtime.
+Real noVNC cluster, IdP, groups/channels, `readAttachment*`, production/store installers (packaging-skeleton is dist+scripts only), vendor grok runtime.
+D1 is **same-machine** Xvfb+x11vnc (not a cluster).

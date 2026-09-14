@@ -164,6 +164,7 @@ $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\d
             <button id="btnVnc" type="button">Open desktop</button>
             <span class="mono" id="vncOut">vnc: —</span>
           </div>
+          <p class="hint mono">expiresHint ≈ 5min；过期再点 Open desktop 刷新 descriptor。键鼠走 VNC 客户端，不是 bot.command。真显示见 docs/p1-desktop-runbook.md。</p>
           <div class="row">
             <input id="filePick" type="file" />
             <button id="btnUpload" type="button">uploadAttachment</button>

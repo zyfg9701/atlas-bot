@@ -45,3 +45,8 @@ RUST_LOG=info cargo run -p atlas-bot-hub
 See [P5-real-runbook.md](./P5-real-runbook.md) for `ATLAS_VNC_MODE` /
 `ATLAS_ATTACH_MODE`, disk TTL, and proxy mock Evidence.
 
+
+## P1 桌面真用 (D1)
+
+See [p1-desktop-runbook.md](./p1-desktop-runbook.md) for Xvfb+x11vnc,
+RFB probe-before-mint, and honest stub degrade.

@@ -118,7 +118,7 @@ cd clients/pc && npm i && npm run tauri dev
 | sendPrompt 无内容 / echo | Hub 仍在 stub（未设 `ATLAS_GATEWAY_URL`）；请走 **cli 主路径** `./scripts/dev-cli-stack.sh` 或 `.\scripts\dev-cli-stack.ps1` |
 | 有对话无 mid-turn 事件 | 分进程未配 B1；或未订阅（Send 会自动订） |
 | 上传 `args_too_large` | 文件太大；换 &lt;1.5 MiB |
-| Open desktop 空白 | stub 正常；真桌面见 P5-real runbook |
+| Open desktop 空白 / stub | 无显示栈或探活失败（诚实降级）；起 `./scripts/atlas-desktop-stack.sh start` 后见 [p1-desktop-runbook.md](./p1-desktop-runbook.md) |
 
 ---
 
@@ -137,7 +137,7 @@ cd clients/pc && npm i && npm run tauri dev
 - U1 手测：`docs/pc-ui-u1-checklist.md`  
 - **主路径：** [`docs/cli-primary-runbook.md`](./cli-primary-runbook.md)  
 - Windows 起栈：[`docs/windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
-- 阶段 runbook：`docs/P*-runbook.md`、`docs/i2-login-runbook.md`、`docs/b1-event-ingest-runbook.md`  
+- 阶段 runbook：`docs/P*-runbook.md`、`docs/p1-desktop-runbook.md`、`docs/i2-login-runbook.md`、`docs/b1-event-ingest-runbook.md`  
 - 飞天验收 / 盘古可行性：knowledge-handoff `feitian-pc-ui-convergence-acceptance.md`、`pangu-pc-ui-convergence-feasibility.md`
 
 ---
