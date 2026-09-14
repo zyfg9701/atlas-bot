@@ -8,6 +8,12 @@
 //! map stream-json / `ATLAS_DELTA` → [`RuntimeHint`] mid-turn, then Finished.
 //! Never fake-streams a final reply into deltas. Optional B1 POST when
 //! `ATLAS_HUB_EVENT_URL` is set (fail-warn only).
+//!
+//! CG1 tool approval (reuses GA1 [`ApprovalState`] + `POST /approve`):
+//! when stream is on, dangerous `tool_call` status=started (and mock
+//! `ATLAS_TOOL`) hang for Allow/Deny/timeout; Deny/timeout → interrupt/kill
+//! child. Text mode cannot gate mid-turn tools — see
+//! `docs/tool-approval-runbook.md` § cli/CG1. Not box-style zero side-effects.
 
 #![allow(dead_code)]
 
@@ -25,6 +31,12 @@ use tokio::process::Command;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::{info, warn};
 
+use uuid::Uuid;
+
+use crate::tool_approval::{
+    classify_cli_tool, format_pending_summary, ApprovalDecision, ApprovalState, CliToolGateClass,
+    GateOutcome, ToolApprovalMode,
+};
 use crate::{
     box_sidecar::{ENV_HUB_EVENT_TOKEN, ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS},
     AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
@@ -76,6 +88,21 @@ struct Inner {
     next_agent_n: u64,
 }
 
+enum StreamLineKind {
+    Final(String),
+    ToolStarted {
+        tool: String,
+        summary: String,
+        status: String,
+    },
+    ToolObserved {
+        tool: String,
+        summary: String,
+        exit_code: Option<i32>,
+    },
+    Other,
+}
+
 struct PendingTurn {
     /// Signal sendPrompt's select to kill the child.
     cancel: Mutex<Option<oneshot::Sender<()>>>,
@@ -97,6 +124,8 @@ struct Shared {
     event_url: Option<String>,
     event_token: Option<String>,
     http: reqwest::Client,
+    /// CG1: reuse GA1 ApprovalState (local gate + /approve).
+    approval: ApprovalState,
 }
 
 /// Real-dialogue gateway backed by a local Agent CLI in print mode.
@@ -106,6 +135,8 @@ pub struct CliAgentGateway {
 }
 
 impl CliAgentGateway {
+    /// Product path: unset `ATLAS_TOOL_APPROVAL_MODE` → **`gate`** (CG1; aligned with feasibility §5).
+    /// Gate only covers stream mode; text mode cannot mid-turn gate (documented).
     pub fn from_env() -> Self {
         let cli_path = std::env::var(ENV_AGENT_CLI)
             .unwrap_or_else(|_| DEFAULT_CLI.to_string())
@@ -128,12 +159,30 @@ impl CliAgentGateway {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        Self::new_full(cli_path, extra_args, timeout, stream, event_url, event_token)
+        let approval_mode = ToolApprovalMode::from_env_product_default();
+        Self::new_full(
+            cli_path,
+            extra_args,
+            timeout,
+            stream,
+            event_url,
+            event_token,
+            approval_mode,
+        )
     }
 
     /// Text-mode constructor (no mid-turn streaming). Used by p35 smoke.
+    /// In-process default approval mode = `off` (env still honored) so deepen/cli smokes stay green.
     pub fn new(cli_path: PathBuf, extra_args: Vec<String>, timeout: Option<Duration>) -> Self {
-        Self::new_full(cli_path, extra_args, timeout, false, None, None)
+        Self::new_full(
+            cli_path,
+            extra_args,
+            timeout,
+            false,
+            None,
+            None,
+            ToolApprovalMode::from_env_test_default(),
+        )
     }
 
     /// CS1 streaming constructor (same-process B2 via `turn_tx`).
@@ -147,7 +196,15 @@ impl CliAgentGateway {
         } else {
             extra_args
         };
-        Self::new_full(cli_path, args, timeout, true, None, None)
+        Self::new_full(
+            cli_path,
+            args,
+            timeout,
+            true,
+            None,
+            None,
+            ToolApprovalMode::from_env_test_default(),
+        )
     }
 
     /// CS1b: streaming + optional B1 `ATLAS_HUB_EVENT_URL` POST.
@@ -164,7 +221,31 @@ impl CliAgentGateway {
         } else {
             extra_args
         };
-        Self::new_full(cli_path, args, timeout, stream, event_url, event_token)
+        Self::new_full(
+            cli_path,
+            args,
+            timeout,
+            stream,
+            event_url,
+            event_token,
+            ToolApprovalMode::from_env_test_default(),
+        )
+    }
+
+    /// CG1 smoke / explicit approval mode (stream typically true).
+    pub fn new_with_approval(
+        cli_path: PathBuf,
+        extra_args: Vec<String>,
+        timeout: Option<Duration>,
+        stream: bool,
+        approval_mode: ToolApprovalMode,
+    ) -> Self {
+        let args = if extra_args.is_empty() {
+            default_extra_args(stream)
+        } else {
+            extra_args
+        };
+        Self::new_full(cli_path, args, timeout, stream, None, None, approval_mode)
     }
 
     fn new_full(
@@ -174,6 +255,7 @@ impl CliAgentGateway {
         stream_enabled: bool,
         event_url: Option<String>,
         event_token: Option<String>,
+        approval_mode: ToolApprovalMode,
     ) -> Self {
         let (turn_tx, _) = tokio::sync::broadcast::channel(64);
         let mut agents = HashMap::new();
@@ -217,8 +299,76 @@ impl CliAgentGateway {
                 event_url,
                 event_token,
                 http: reqwest::Client::new(),
+                approval: ApprovalState::new(
+                    approval_mode,
+                    ApprovalState::timeout_from_env(),
+                    ApprovalState::token_from_env(),
+                ),
             }),
         }
+    }
+
+    pub fn tool_approval_mode(&self) -> ToolApprovalMode {
+        self.shared.approval.mode
+    }
+
+    pub fn tool_approval_timeout_ms(&self) -> u64 {
+        self.shared.approval.timeout.as_millis() as u64
+    }
+
+    pub fn tool_approval_token_configured(&self) -> bool {
+        self.shared.approval.token.is_some()
+    }
+
+    pub fn stream_enabled(&self) -> bool {
+        self.shared.stream_enabled
+    }
+
+    /// Test/CI hook: queue a decision applied to the next gated tool (FIFO).
+    pub fn inject_approval_decision(&self, decision: ApprovalDecision) {
+        if let Ok(mut q) = self.shared.approval.inject.lock() {
+            q.push_back(decision);
+        }
+    }
+
+    /// Resolve a pending approval (in-process or HTTP `/approve`).
+    pub async fn submit_tool_approval(
+        &self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<Value, GatewayError> {
+        let slot = {
+            let mut map = self.shared.approval.pending.write().await;
+            map.remove(approval_id)
+        };
+        let Some(slot) = slot else {
+            return Err(GatewayError::Rejected {
+                reason: "approval_closed".into(),
+                detail: Some("unknown_or_consumed".into()),
+            });
+        };
+        let _ = slot.tx.send(decision);
+        info!(
+            approval_id,
+            decision = decision.as_str(),
+            tool = %slot.tool,
+            agent_id = %slot.agent_id,
+            "CG1 cli tool approval resolved"
+        );
+        Ok(json!({
+            "ok": true,
+            "approvalId": approval_id,
+            "decision": decision.as_str(),
+            "tool": slot.tool,
+            "agentId": slot.agent_id,
+        }))
+    }
+
+    pub async fn pending_approval_ids(&self) -> Vec<String> {
+        let map = self.shared.approval.pending.read().await;
+        let mut ids: Vec<_> = map.keys().cloned().collect();
+        ids.sort();
+        ids
     }
 
     pub fn subscribe_turns(&self) -> tokio::sync::broadcast::Receiver<RuntimeHint> {
@@ -476,37 +626,68 @@ impl CliAgentGateway {
         });
     }
 
-    /// Apply one stdout line while streaming. Returns Some(final) when `result` seen.
+    /// Apply one stdout line while streaming (no gate). Returns Some(final) when `result` seen.
     fn handle_stream_line(&self, agent_id: &str, line: &str, deltas: &mut Vec<String>) -> Option<String> {
+        match self.classify_stream_line(agent_id, line, deltas) {
+            StreamLineKind::Final(s) => Some(s),
+            StreamLineKind::ToolStarted { tool, summary, .. } => {
+                self.emit_tool(agent_id, &tool, &summary, None);
+                None
+            }
+            StreamLineKind::ToolObserved { tool, summary, exit_code } => {
+                self.emit_tool(agent_id, &tool, &summary, exit_code);
+                None
+            }
+            StreamLineKind::Other => None,
+        }
+    }
+
+    fn classify_stream_line(
+        &self,
+        agent_id: &str,
+        line: &str,
+        deltas: &mut Vec<String>,
+    ) -> StreamLineKind {
+        let _ = agent_id;
         let line = line.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
-            return None;
+            return StreamLineKind::Other;
         }
 
-        // Simple atlas mock lines (gateway accepts both these and NDJSON).
         if let Some(rest) = line.strip_prefix("ATLAS_DELTA\t") {
             self.emit_delta(agent_id, rest);
             deltas.push(rest.to_string());
-            return None;
+            return StreamLineKind::Other;
         }
+        // Mock ATLAS_TOOL → treat as started (gate-eligible) when CG1 active.
         if let Some(rest) = line.strip_prefix("ATLAS_TOOL\t") {
             let mut parts = rest.splitn(3, '\t');
-            let tool = parts.next().unwrap_or("tool");
-            let summary = parts.next().unwrap_or("");
+            let tool = parts.next().unwrap_or("tool").to_string();
+            let summary = parts.next().unwrap_or("").to_string();
             let code = parts.next().and_then(|s| s.parse::<i32>().ok());
-            self.emit_tool(agent_id, tool, summary, code);
-            return None;
+            // If exit code present, treat as completed observation; else started.
+            if code.is_some() {
+                return StreamLineKind::ToolObserved {
+                    tool,
+                    summary,
+                    exit_code: code,
+                };
+            }
+            return StreamLineKind::ToolStarted {
+                tool,
+                summary,
+                status: "started".into(),
+            };
         }
 
         let Ok(v) = serde_json::from_str::<Value>(line) else {
-            // Non-JSON plain line: keep as candidate final (text-mode style).
-            return None;
+            return StreamLineKind::Other;
         };
         let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match ty {
             "assistant" => {
                 if !is_assistant_partial(&v) {
-                    return None;
+                    return StreamLineKind::Other;
                 }
                 if let Some(t) = extract_assistant_text(&v) {
                     if !t.is_empty() {
@@ -514,39 +695,134 @@ impl CliAgentGateway {
                         deltas.push(t);
                     }
                 }
-                None
+                StreamLineKind::Other
             }
             "tool_call" => {
                 let status = v
                     .get("status")
                     .or_else(|| v.get("subtype"))
                     .and_then(|s| s.as_str())
-                    .unwrap_or("");
-                if status == "started" || status == "completed" || status.is_empty() {
-                    let tool = v
-                        .get("name")
-                        .or_else(|| v.get("tool"))
-                        .or_else(|| v.pointer("/tool_call/name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("tool_call");
-                    let summary = v
-                        .get("summary")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or(status);
-                    let exit_code = v.get("exit_code").and_then(|c| c.as_i64()).map(|c| c as i32);
-                    self.emit_tool(agent_id, tool, summary, exit_code);
+                    .unwrap_or("")
+                    .to_string();
+                let tool = v
+                    .get("name")
+                    .or_else(|| v.get("tool"))
+                    .or_else(|| v.pointer("/tool_call/name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("tool_call")
+                    .to_string();
+                let summary = v
+                    .get("summary")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(status.as_str())
+                    .to_string();
+                let exit_code = v.get("exit_code").and_then(|c| c.as_i64()).map(|c| c as i32);
+                let class = classify_cli_tool(&tool, &summary, &status);
+                match class {
+                    CliToolGateClass::ObserveOnly => StreamLineKind::ToolObserved {
+                        tool,
+                        summary,
+                        exit_code,
+                    },
+                    CliToolGateClass::Exempt | CliToolGateClass::Gated => {
+                        // Exempt vs gated decided later; both emit as started-ish when not completed.
+                        if status.eq_ignore_ascii_case("completed") {
+                            StreamLineKind::ToolObserved {
+                                tool,
+                                summary,
+                                exit_code,
+                            }
+                        } else {
+                            StreamLineKind::ToolStarted {
+                                tool,
+                                summary,
+                                status,
+                            }
+                        }
+                    }
                 }
-                None
             }
             "result" => {
                 if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
-                    Some(r.to_string())
+                    StreamLineKind::Final(r.to_string())
                 } else {
-                    None
+                    StreamLineKind::Other
                 }
             }
-            _ => None, // unknown types ignored
+            _ => StreamLineKind::Other,
         }
+    }
+
+    /// CG1: hang for Allow/Deny/timeout. Failures → Deny (never Allow).
+    async fn await_cli_tool_approval(
+        &self,
+        agent_id: &str,
+        tool: &str,
+        detail: &str,
+    ) -> GateOutcome {
+        match self.shared.approval.mode {
+            ToolApprovalMode::Off => return GateOutcome::Allow,
+            ToolApprovalMode::AutoDeny => {
+                info!(%agent_id, %tool, "CG1 auto_deny");
+                return GateOutcome::AutoDeny;
+            }
+            ToolApprovalMode::Gate => {}
+        }
+
+        if let Ok(mut q) = self.shared.approval.inject.lock() {
+            if let Some(d) = q.pop_front() {
+                return match d {
+                    ApprovalDecision::Allow => GateOutcome::Allow,
+                    ApprovalDecision::Deny => GateOutcome::Deny,
+                };
+            }
+        }
+
+        let approval_id = format!("appr_{}", Uuid::new_v4().simple());
+        let (tx, rx) = oneshot::channel::<ApprovalDecision>();
+        {
+            let mut map = self.shared.approval.pending.write().await;
+            map.insert(
+                approval_id.clone(),
+                crate::tool_approval::PendingApprovalSlot {
+                    agent_id: agent_id.to_string(),
+                    tool: tool.to_string(),
+                    summary: detail.to_string(),
+                    tx,
+                },
+            );
+        }
+
+        let pending_summary = format_pending_summary(&approval_id, tool, detail);
+        self.emit_tool(agent_id, "approval_pending", &pending_summary, None);
+        info!(%agent_id, %tool, %approval_id, "CG1 approval pending");
+
+        let timeout = self.shared.approval.timeout;
+        let outcome = tokio::select! {
+            res = rx => match res {
+                Ok(ApprovalDecision::Allow) => GateOutcome::Allow,
+                Ok(ApprovalDecision::Deny) => GateOutcome::Deny,
+                Err(_) => {
+                    warn!(%approval_id, "CG1 approval channel closed; denying");
+                    GateOutcome::Deny
+                }
+            },
+            _ = tokio::time::sleep(timeout) => GateOutcome::Timeout,
+        };
+
+        {
+            let mut map = self.shared.approval.pending.write().await;
+            map.remove(&approval_id);
+        }
+
+        info!(
+            %agent_id,
+            %tool,
+            %approval_id,
+            outcome = outcome.reason(),
+            "CG1 approval settled"
+        );
+        outcome
     }
 
     async fn run_cli(
@@ -572,6 +848,7 @@ impl CliAgentGateway {
             cli = %self.shared.cli_path.display(),
             %agent_id,
             stream = self.shared.stream_enabled,
+            approval = self.shared.approval.mode.as_str(),
             "spawning agent CLI"
         );
         let mut child = cmd.spawn().map_err(|e| {
@@ -619,8 +896,6 @@ impl CliAgentGateway {
         let err_buf = stderr_task.await.unwrap_or_default();
         let err_text = String::from_utf8_lossy(&err_buf).trim().to_string();
 
-        // Status already validated inside helpers when stream/text return Ok.
-        // Re-check empty / echo here for both paths.
         if text.is_empty() {
             return Err(GatewayError::Upstream(if err_text.is_empty() {
                 "CLI produced empty reply".into()
@@ -633,7 +908,7 @@ impl CliAgentGateway {
                 "CLI reply looked like stub echo; refusing".into(),
             ));
         }
-        let _ = err_text; // stderr only used for empty-reply context above
+        let _ = err_text;
         Ok(text)
     }
 
@@ -647,6 +922,7 @@ impl CliAgentGateway {
         pending: Arc<PendingTurn>,
         timeout: Option<Duration>,
     ) -> Result<String, GatewayError> {
+        // CG1: text mode cannot gate mid-turn tools (no tool_call visibility).
         let stdout_task = tokio::spawn(async move {
             let mut buf = Vec::new();
             let _ = stdout.read_to_end(&mut buf).await;
@@ -704,81 +980,144 @@ impl CliAgentGateway {
         prompt: &str,
         child: &mut tokio::process::Child,
         stdout: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-        kill_rx: oneshot::Receiver<()>,
+        mut kill_rx: oneshot::Receiver<()>,
         pending: Arc<PendingTurn>,
         timeout: Option<Duration>,
     ) -> Result<String, GatewayError> {
-        let this = self.clone();
-        let agent = agent_id.to_string();
-        let (parsed_tx, parsed_rx) = oneshot::channel::<(Option<String>, Vec<String>, String)>();
+        let mut reader = BufReader::new(stdout);
+        let mut deltas: Vec<String> = Vec::new();
+        let mut final_from_result: Option<String> = None;
+        let mut plain = String::new();
+        let mut line = String::new();
+        // Deny/timeout returns early with closed-set preview (no deferred reason).
+        let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
 
-        let reader_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            let mut deltas: Vec<String> = Vec::new();
-            let mut final_from_result: Option<String> = None;
-            let mut plain = String::new();
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim_end_matches(['\r', '\n']);
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        // Plain non-protocol line (text fallback / final mock line).
-                        let is_json = trimmed.starts_with('{');
-                        let is_atlas = trimmed.starts_with("ATLAS_");
-                        if let Some(fin) = this.handle_stream_line(&agent, trimmed, &mut deltas) {
-                            final_from_result = Some(fin);
-                        } else if !is_json && !is_atlas {
-                            if !plain.is_empty() {
-                                plain.push('\n');
-                            }
-                            plain.push_str(trimmed);
-                        }
-                    }
-                    Err(_) => break,
+        loop {
+            if let Some(d) = deadline {
+                if tokio::time::Instant::now() >= d {
+                    warn!(%agent_id, "CLI soft timeout — killing");
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    pending.pid.store(0, Ordering::SeqCst);
+                    return Err(GatewayError::Upstream(
+                        "CLI timeout (ATLAS_AGENT_CLI_TIMEOUT_MS exceeded)".into(),
+                    ));
                 }
             }
-            let _ = parsed_tx.send((final_from_result, deltas, plain));
-        });
 
-        let wait_fut = child.wait();
+            line.clear();
+            let read_deadline = deadline.unwrap_or_else(|| {
+                tokio::time::Instant::now() + Duration::from_secs(365 * 24 * 3600)
+            });
+            let n = tokio::select! {
+                biased;
+                res = reader.read_line(&mut line) => {
+                    res.map_err(|e| GatewayError::Upstream(format!("CLI stdout read: {e}")))?
+                }
+                _ = &mut kill_rx => {
+                    warn!(%agent_id, pid = pending.pid.load(Ordering::SeqCst), "CLI kill via interrupt");
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    pending.pid.store(0, Ordering::SeqCst);
+                    return Err(GatewayError::Upstream("gateway/run-interrupted".into()));
+                }
+                _ = tokio::time::sleep_until(read_deadline) => {
+                    warn!(%agent_id, "CLI soft timeout — killing");
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    pending.pid.store(0, Ordering::SeqCst);
+                    return Err(GatewayError::Upstream(
+                        "CLI timeout (ATLAS_AGENT_CLI_TIMEOUT_MS exceeded)".into(),
+                    ));
+                }
+            };
+
+            if n == 0 {
+                break;
+            }
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let is_json = trimmed.starts_with('{');
+            let is_atlas = trimmed.starts_with("ATLAS_");
+            let kind = self.classify_stream_line(agent_id, trimmed, &mut deltas);
+            match kind {
+                StreamLineKind::Final(fin) => {
+                    final_from_result = Some(fin);
+                }
+                StreamLineKind::ToolObserved { tool, summary, exit_code } => {
+                    self.emit_tool(agent_id, &tool, &summary, exit_code);
+                }
+                StreamLineKind::ToolStarted { tool, summary, status: _ } => {
+                    let class = classify_cli_tool(&tool, &summary, "started");
+                    match class {
+                        CliToolGateClass::Exempt | CliToolGateClass::ObserveOnly => {
+                            self.emit_tool(agent_id, &tool, &summary, None);
+                        }
+                        CliToolGateClass::Gated => {
+                            // Always emit the started observation, then gate.
+                            self.emit_tool(agent_id, &tool, &summary, None);
+                            let gate_active = self.shared.approval.mode != ToolApprovalMode::Off;
+                            if gate_active {
+                                let detail = format!("cli tool_call started name={tool} {summary}");
+                                let outcome = tokio::select! {
+                                    biased;
+                                    o = self.await_cli_tool_approval(agent_id, &tool, &detail) => o,
+                                    _ = &mut kill_rx => {
+                                        warn!(%agent_id, "interrupt during CG1 approval hang → Deny");
+                                        GateOutcome::Deny
+                                    }
+                                };
+                                if !outcome.is_allow() {
+                                    let reason = outcome.reason();
+                                    // Deny/timeout/auto_deny → interrupt/kill (best-effort).
+                                    // Never silent Allow. Kill failure still records Deny.
+                                    if let Err(e) = child.start_kill() {
+                                        warn!(%agent_id, error = %e, "CG1 start_kill failed; still Deny");
+                                    }
+                                    let _ = child.wait().await;
+                                    pending.pid.store(0, Ordering::SeqCst);
+                                    // Closed-set reason as turn reply (greppable preview).
+                                    return Ok(format!(
+                                        "[cli tool approval] {reason} tool={tool} (child interrupted; not box zero-side-effect)"
+                                    ));
+                                }
+                                // Allow: do not kill; continue consuming stream.
+                                self.emit_tool(
+                                    agent_id,
+                                    &tool,
+                                    &format!("{summary} approval=allow"),
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+                StreamLineKind::Other => {
+                    if !is_json && !is_atlas {
+                        if !plain.is_empty() {
+                            plain.push('\n');
+                        }
+                        plain.push_str(trimmed);
+                    }
+                }
+            }
+        }
+
+        // Drain process exit (if still running).
         let status = tokio::select! {
-            status = wait_fut => {
+            status = child.wait() => {
                 status.map_err(|e| GatewayError::Upstream(format!("CLI wait: {e}")))?
             }
-            _ = kill_rx => {
+            _ = &mut kill_rx => {
                 warn!(%agent_id, pid = pending.pid.load(Ordering::SeqCst), "CLI kill via interrupt");
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                reader_task.abort();
                 pending.pid.store(0, Ordering::SeqCst);
                 return Err(GatewayError::Upstream("gateway/run-interrupted".into()));
             }
-            _ = async {
-                if let Some(t) = timeout {
-                    tokio::time::sleep(t).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                warn!(%agent_id, "CLI soft timeout — killing");
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                reader_task.abort();
-                pending.pid.store(0, Ordering::SeqCst);
-                return Err(GatewayError::Upstream(
-                    "CLI timeout (ATLAS_AGENT_CLI_TIMEOUT_MS exceeded)".into(),
-                ));
-            }
         };
-
-        // Ensure reader finishes after process exit (EOF).
-        let _ = reader_task.await;
-        let (final_from_result, deltas, plain) = parsed_rx.await.unwrap_or((None, Vec::new(), String::new()));
 
         if !status.success() {
             return Err(GatewayError::Upstream(format!(
@@ -787,7 +1126,6 @@ impl CliAgentGateway {
             )));
         }
 
-        // Prefer result.result; else joined deltas; else plain text lines.
         let text = if let Some(r) = final_from_result {
             r.trim().to_string()
         } else if !plain.trim().is_empty() {
@@ -951,6 +1289,26 @@ impl Gateway for CliAgentGateway {
     fn invoke_count(&self) -> u64 {
         self.shared.invokes.load(Ordering::SeqCst)
     }
+
+    async fn tool_approve(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<Value, GatewayError> {
+        let Some(d) = ApprovalDecision::parse(decision) else {
+            return Err(GatewayError::InvalidArgs(
+                "decision must be allow|deny".into(),
+            ));
+        };
+        self.submit_tool_approval(approval_id, d).await
+    }
+
+    fn tool_approval_info(&self) -> Option<(String, bool)> {
+        Some((
+            self.shared.approval.mode.as_str().to_string(),
+            self.shared.approval.token.is_some(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -961,6 +1319,18 @@ impl Gateway for Arc<CliAgentGateway> {
 
     fn invoke_count(&self) -> u64 {
         (**self).invoke_count()
+    }
+
+    async fn tool_approve(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<Value, GatewayError> {
+        (**self).tool_approve(approval_id, decision).await
+    }
+
+    fn tool_approval_info(&self) -> Option<(String, bool)> {
+        (**self).tool_approval_info()
     }
 }
 

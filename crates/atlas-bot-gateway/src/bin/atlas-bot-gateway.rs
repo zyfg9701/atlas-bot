@@ -14,7 +14,7 @@
 //! - `ATLAS_OPENAI_*` — when backend=`openai`
 //! - `ATLAS_BOX_WORKSPACE` / `ATLAS_BOX_TURN_DELAY_MS` / `ATLAS_BOX_LLM_*` — when backend=`box`
 //! - `ATLAS_TOOL_APPROVAL_MODE` / `ATLAS_TOOL_APPROVAL_TIMEOUT_MS` / `ATLAS_TOOL_APPROVAL_TOKEN`
-//!   — GA1 box tool gate (see docs/tool-approval-runbook.md); product default mode=`gate`
+//!   — GA1 box + CG1 cli tool gate (see docs/tool-approval-runbook.md); product default mode=`gate`
 //! - `ATLAS_HUB_EVENT_URL` / `ATLAS_HUB_EVENT_TOKEN` — B1 mid-turn RuntimeHint POST
 //!   to Hub loopback ingest (see docs/b1-event-ingest-runbook.md)
 //!
@@ -86,10 +86,15 @@ async fn main() {
             let cli_raw = std::env::var(ENV_AGENT_CLI).unwrap_or_else(|_| "agent".into());
             let cli_path = PathBuf::from(&cli_raw);
             let found = resolve_agent_cli_found(&cli_path);
+            let g = CliAgentGateway::from_env();
+            let approval_mode = g.tool_approval_mode().as_str().to_string();
+            let approval_token = g.tool_approval_token_configured();
             info!(
                 cli = %cli_raw,
                 agent_cli_found = found,
-                "backend=cli (Cursor/Atlas Agent CLI adapter)"
+                stream = g.stream_enabled(),
+                tool_approval_mode = %approval_mode,
+                "backend=cli (Cursor/Atlas Agent CLI adapter + CG1 gate)"
             );
             if !found {
                 tracing::warn!(
@@ -97,9 +102,16 @@ async fn main() {
                     "ATLAS_AGENT_CLI not found on PATH/disk — sendPrompt will fail visibly (not stub echo). See docs/cli-primary-runbook.md"
                 );
             }
+            if !g.stream_enabled() && approval_mode != "off" {
+                tracing::warn!(
+                    "CG1: ATLAS_TOOL_APPROVAL_MODE={approval_mode} but ATLAS_AGENT_CLI_STREAM is off — text mode cannot gate mid-turn tools; see docs/tool-approval-runbook.md"
+                );
+            }
             (
-                Arc::new(CliAgentGateway::from_env()),
-                GatewayHttpMeta::for_backend("cli").with_cli(cli_raw, found),
+                Arc::new(g),
+                GatewayHttpMeta::for_backend("cli")
+                    .with_cli(cli_raw, found)
+                    .with_tool_approval(approval_mode, approval_token),
             )
         }
     };

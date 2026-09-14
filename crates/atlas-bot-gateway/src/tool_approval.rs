@@ -169,3 +169,139 @@ impl ApprovalState {
 pub fn format_pending_summary(approval_id: &str, tool: &str, detail: &str) -> String {
     format!("{APPROVAL_PENDING_PREFIX} approvalId={approval_id} tool={tool}] {detail}")
 }
+
+/// CG1: classify a CLI stream-json / ATLAS_TOOL name for human gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliToolGateClass {
+    /// Read-only tools — emit hub:tool only; do not hang.
+    Exempt,
+    /// Dangerous / unknown — hang for Allow/Deny (or auto_deny).
+    Gated,
+    /// `tool_call` status=completed — observe only; never re-gate.
+    ObserveOnly,
+}
+
+/// Case-insensitive exempt names (CG1 / runbook).
+const CLI_EXEMPT: &[&str] = &[
+    "read",
+    "readfile",
+    "grep",
+    "glob",
+    "ls",
+    "listdir",
+    "semanticsearch",
+    "websearch",
+    "fetch",
+    "webfetch",
+];
+
+/// Case-insensitive explicitly gated names (CG1 / runbook).
+const CLI_GATED: &[&str] = &[
+    "shell",
+    "bash",
+    "run",
+    "write",
+    "writefile",
+    "edit",
+    "delete",
+    "remove",
+    "applypatch",
+    "notebookedit",
+];
+
+fn normalize_tool_token(name: &str) -> String {
+    name.trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Write-ish MCP heuristic: name/summary contains `mcp` and a write/exec keyword.
+pub fn cli_tool_is_writeish_mcp(name: &str, summary: &str) -> bool {
+    let blob = format!("{name} {summary}").to_ascii_lowercase();
+    if !blob.contains("mcp") {
+        return false;
+    }
+    const KEYS: &[&str] = &[
+        "write", "edit", "delete", "remove", "exec", "shell", "run", "patch", "create", "mkdir",
+        "bash", "apply",
+    ];
+    KEYS.iter().any(|k| blob.contains(k))
+}
+
+/// Classify CLI tool for CG1 gate.
+///
+/// - `status == "completed"` → [`CliToolGateClass::ObserveOnly`]
+/// - known exempt → Exempt
+/// - known gated / write-ish MCP / **unknown** → Gated (default deny-pending)
+pub fn classify_cli_tool(name: &str, summary: &str, status: &str) -> CliToolGateClass {
+    let status = status.trim().to_ascii_lowercase();
+    if status == "completed" {
+        return CliToolGateClass::ObserveOnly;
+    }
+    let key = normalize_tool_token(name);
+    if key.is_empty() {
+        return CliToolGateClass::Gated;
+    }
+    if CLI_EXEMPT.iter().any(|e| *e == key.as_str()) {
+        return CliToolGateClass::Exempt;
+    }
+    if CLI_GATED.iter().any(|e| *e == key.as_str()) {
+        return CliToolGateClass::Gated;
+    }
+    if cli_tool_is_writeish_mcp(name, summary) {
+        return CliToolGateClass::Gated;
+    }
+    // Unknown names: default gated (CG1 hard rule).
+    CliToolGateClass::Gated
+}
+
+#[cfg(test)]
+mod cli_classify_tests {
+    use super::*;
+
+    #[test]
+    fn exempt_read_case_insensitive() {
+        assert_eq!(
+            classify_cli_tool("Read", "", "started"),
+            CliToolGateClass::Exempt
+        );
+        assert_eq!(
+            classify_cli_tool("READFILE", "x", "started"),
+            CliToolGateClass::Exempt
+        );
+        assert_eq!(
+            classify_cli_tool("WebSearch", "q", ""),
+            CliToolGateClass::Exempt
+        );
+    }
+
+    #[test]
+    fn gated_shell_and_unknown() {
+        assert_eq!(
+            classify_cli_tool("Shell", "rm -rf", "started"),
+            CliToolGateClass::Gated
+        );
+        assert_eq!(
+            classify_cli_tool("MysteryTool", "", "started"),
+            CliToolGateClass::Gated
+        );
+    }
+
+    #[test]
+    fn completed_observe_only() {
+        assert_eq!(
+            classify_cli_tool("Shell", "done", "completed"),
+            CliToolGateClass::ObserveOnly
+        );
+    }
+
+    #[test]
+    fn mcp_writeish() {
+        assert_eq!(
+            classify_cli_tool("mcp_fs", "write file", "started"),
+            CliToolGateClass::Gated
+        );
+    }
+}
