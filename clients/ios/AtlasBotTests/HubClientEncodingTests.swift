@@ -64,4 +64,30 @@ final class HubClientEncodingTests: XCTestCase {
     func testGeneratedEnvelopeConstant() throws {
         XCTAssertEqual(BOT_EVENT_ENVELOPE_V, 1)
     }
+
+    func testVncDescriptorFrameIsHotMethod() throws {
+        let params = RpcFrames.vncDescriptor(agentId: "agt_1")
+        XCTAssertEqual(params["agentId"] as? String, "agt_1")
+        let frame = RpcFrames.rpc(id: 9, method: "bot.vncDescriptor", params: params)
+        XCTAssertEqual(frame["method"] as? String, "bot.vncDescriptor")
+        XCTAssertFalse((frame["method"] as? String)?.hasPrefix("bot.command") == true)
+        let nested = frame["params"] as? [String: Any]
+        XCTAssertEqual(nested?["agentId"] as? String, "agt_1")
+    }
+
+    func testVncDescriptorResultParsesUrlAndHint() throws {
+        let withHint = try RpcFrames.parseVncDescriptor([
+            "vncUrl": "http://127.0.0.1:8787/vnc-stub?agent=agt_1",
+            "expiresHint": NSNumber(value: Int64(1_700_000_000_000)),
+        ] as [String: Any])
+        XCTAssertEqual(withHint.vncUrl, "http://127.0.0.1:8787/vnc-stub?agent=agt_1")
+        XCTAssertEqual(withHint.expiresHint, 1_700_000_000_000)
+
+        let nullHint = try RpcFrames.parseVncDescriptor([
+            "vncUrl": "http://127.0.0.1:8787/vnc/tok_x/",
+            "expiresHint": NSNull(),
+        ] as [String: Any])
+        XCTAssertEqual(nullHint.vncUrl, "http://127.0.0.1:8787/vnc/tok_x/")
+        XCTAssertNil(nullHint.expiresHint)
+    }
 }

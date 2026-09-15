@@ -1,8 +1,11 @@
 package com.atlasbot.client.ui
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -46,6 +49,7 @@ import com.atlasbot.client.HelloAck
 import com.atlasbot.client.HubClient
 import com.atlasbot.client.HubClientListener
 import com.atlasbot.client.RosterEntry
+import com.atlasbot.client.VncDescriptor
 import com.atlasbot.client.auth.AuthSession
 import com.atlasbot.client.auth.DEFAULT_ANDROID_CLIENT_ID
 import com.atlasbot.client.auth.MOBILE_REDIRECT_URI
@@ -106,6 +110,7 @@ private fun AtlasBotScreen() {
     // Signal for turn_finished → auto transcript refresh (listener is created once).
     var pendingTailHint by remember { mutableStateOf("") }
     var pendingTailNonce by remember { mutableStateOf(0) }
+    var vncOut by remember { mutableStateOf("—") }
 
     fun appendLog(line: String) {
         logs.add(0, line)
@@ -262,6 +267,61 @@ private fun AtlasBotScreen() {
         } else {
             send()
         }
+    }
+
+    fun openExternalUrl(url: String): Boolean {
+        return try {
+            val uri = Uri.parse(url)
+            val tabs = CustomTabsIntent.Builder().build()
+            tabs.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            tabs.launchUrl(context, uri)
+            true
+        } catch (_: Exception) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                true
+            } catch (e: Exception) {
+                lastError = "external open failed: ${e.message}"
+                appendLog("[error] external open failed: ${e.message}")
+                false
+            }
+        }
+    }
+
+    /** MD1: bot.vncDescriptor → Custom Tabs / ACTION_VIEW; never claim real desktop. */
+    fun doOpenDesktop() {
+        val id = selectedAgent.trim()
+        if (id.isEmpty()) {
+            lastError = "agentId required"
+            return
+        }
+        lastError = null
+        client.vncDescriptor(
+            agentId = id,
+            onOk = { desc: VncDescriptor ->
+                onMain {
+                    val exp = if (desc.expiresHint == null) {
+                        "expiresHint=null (无到期)"
+                    } else {
+                        "expiresHint=${desc.expiresHint}"
+                    }
+                    // Honest: App only opened the URL; stub/proxy is server-side.
+                    vncOut = "opened externally · vncUrl=${desc.vncUrl} · $exp · (App 不声称真桌面；过期再点重 mint)"
+                    appendLog("bot.vncDescriptor vncUrl=${desc.vncUrl} $exp")
+                    if (!openExternalUrl(desc.vncUrl)) {
+                        // lastError already set by openExternalUrl
+                    }
+                }
+            },
+            onErr = { e ->
+                onMain {
+                    lastError = formatErr(e)
+                    appendLog("[error] bot.vncDescriptor ${formatErr(e)}")
+                }
+            },
+        )
     }
 
     Column(
@@ -499,16 +559,19 @@ private fun AtlasBotScreen() {
             label = { Text("prompt") },
             modifier = Modifier.fillMaxWidth(),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Button(onClick = {
                 lastError = null
                 doSendPrompt()
             }) { Text("Send") }
+            OutlinedButton(onClick = { doOpenDesktop() }) { Text("🖥") }
             Text(
-                "🖥📎 未接线 — 见调试占位",
+                "📎 upload 未接线",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray,
-                modifier = Modifier.align(Alignment.CenterVertically),
             )
         }
 
@@ -587,8 +650,14 @@ private fun AtlasBotScreen() {
 
             Spacer(Modifier.height(4.dp))
             Text("Desktop · upload", style = MaterialTheme.typography.titleSmall)
+            Button(onClick = { doOpenDesktop() }) { Text("Open desktop") }
             Text(
-                "未接线（MU1 占位）— 不砍未来 VNC/upload 约定；PC U1 已有产品入口。",
+                vncOut,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+            Text(
+                "expiresHint ≈ 5min；过期再点 Open desktop / 🖥 重 mint。外开 Custom Tabs（非内嵌 noVNC）。upload 仍未接线。",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray,
             )

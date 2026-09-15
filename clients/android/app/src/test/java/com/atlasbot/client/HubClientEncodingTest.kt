@@ -74,4 +74,33 @@ class HubClientEncodingTest {
         val err = normalizeError(null)
         assertEquals("upstream_error", err.code)
     }
+
+    @Test
+    fun vncDescriptor_frame_is_hot_method_not_command() {
+        val params = RpcFrames.vncDescriptor("agt_1")
+        assertEquals("agt_1", params.getString("agentId"))
+        val frame = RpcFrames.rpc(9, "bot.vncDescriptor", params)
+        assertEquals("bot.vncDescriptor", frame.getString("method"))
+        assertFalse(frame.getString("method").startsWith("bot.command"))
+        assertEquals("agt_1", frame.getJSONObject("params").getString("agentId"))
+    }
+
+    @Test
+    fun vncDescriptor_result_parses_url_and_hint() {
+        val withHint = RpcFrames.parseVncDescriptor(
+            JSONObject()
+                .put("vncUrl", "http://10.0.2.2:8787/vnc-stub?agent=agt_1")
+                .put("expiresHint", 1_700_000_000_000L),
+        )
+        assertEquals("http://10.0.2.2:8787/vnc-stub?agent=agt_1", withHint.vncUrl)
+        assertEquals(1_700_000_000_000L, withHint.expiresHint)
+
+        val nullHint = RpcFrames.parseVncDescriptor(
+            JSONObject()
+                .put("vncUrl", "http://127.0.0.1:8787/vnc/tok_x/")
+                .put("expiresHint", JSONObject.NULL),
+        )
+        assertEquals("http://127.0.0.1:8787/vnc/tok_x/", nullHint.vncUrl)
+        assertEquals(null, nullHint.expiresHint)
+    }
 }
