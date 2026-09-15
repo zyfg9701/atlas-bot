@@ -48,6 +48,13 @@ public struct DisplayError: Error {
     public let raw: Any?
 }
 
+/// Result of hot Hub method bot.vncDescriptor — NOT a bot.command.
+public struct VncDescriptor {
+    public let vncUrl: String
+    /// Epoch millis; nil = no expiry advertised.
+    public let expiresHint: Int64?
+}
+
 private let knownCodes: Set<String> = [
     "command_rejected",
     "identity_unavailable",
@@ -117,6 +124,31 @@ public enum RpcFrames {
 
     public static func transcriptTailArgs(agentId: String, limit: Int = 20) -> [String: Any] {
         ["id": agentId, "limit": limit]
+    }
+
+    /// Hot Hub method params — NOT a bot.command name.
+    public static func vncDescriptor(agentId: String) -> [String: Any] {
+        ["agentId": agentId]
+    }
+
+    public static func parseVncDescriptor(_ result: Any?) throws -> VncDescriptor {
+        guard let dict = result as? [String: Any],
+              let url = dict["vncUrl"] as? String, !url.isEmpty else {
+            throw DisplayError(message: "vncDescriptor result missing vncUrl", code: "upstream_error", reason: nil, retryable: false, raw: result)
+        }
+        let hint: Int64?
+        if dict["expiresHint"] == nil || dict["expiresHint"] is NSNull {
+            hint = nil
+        } else if let n = dict["expiresHint"] as? NSNumber {
+            hint = n.int64Value
+        } else if let i = dict["expiresHint"] as? Int64 {
+            hint = i
+        } else if let i = dict["expiresHint"] as? Int {
+            hint = Int64(i)
+        } else {
+            hint = nil
+        }
+        return VncDescriptor(vncUrl: url, expiresHint: hint)
     }
 
     public static func encode(_ obj: [String: Any]) throws -> Data {
@@ -417,6 +449,25 @@ public final class HubClient: NSObject, URLSessionWebSocketDelegate {
         command(agentId: agentId, name: "getAgentTranscriptTail",
                 args: RpcFrames.transcriptTailArgs(agentId: agentId, limit: limit),
                 completion: completion)
+    }
+
+    /// Hot Hub method bot.vncDescriptor — NOT a bot.command.
+    /// Shape { vncUrl, expiresHint } unchanged; client opens vncUrl externally.
+    public func vncDescriptor(agentId: String,
+                              completion: @escaping (Result<VncDescriptor, DisplayError>) -> Void) {
+        rpc(method: "bot.vncDescriptor", params: RpcFrames.vncDescriptor(agentId: agentId)) { result in
+            switch result {
+            case .failure(let e): completion(.failure(e))
+            case .success(let r):
+                do {
+                    completion(.success(try RpcFrames.parseVncDescriptor(r)))
+                } catch let e as DisplayError {
+                    completion(.failure(e))
+                } catch {
+                    completion(.failure(normalizeError(["message": error.localizedDescription])))
+                }
+            }
+        }
     }
 }
 

@@ -113,7 +113,8 @@ struct ContentView: View {
                         .textFieldStyle(.roundedBorder)
                     HStack {
                         Button("Send") { model.sendPrompt() }
-                        Text("🖥📎 未接线 — 见调试占位")
+                        Button("🖥") { model.openDesktop() }
+                        Text("📎 upload 未接线")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -146,7 +147,10 @@ struct ContentView: View {
                             .font(.caption2)
 
                         Text("Desktop · upload").font(.subheadline.weight(.semibold))
-                        Text("未接线（MU1 占位）— 不砍未来 VNC/upload 约定；PC U1 已有产品入口。")
+                        Button("Open desktop") { model.openDesktop() }
+                        Text(model.vncOut)
+                            .font(.caption.monospaced())
+                        Text("expiresHint ≈ 5min；过期再点 Open desktop / 🖥 重 mint。外开系统 Safari（非内嵌 noVNC）。upload 仍未接线。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
@@ -201,6 +205,7 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
     @Published var advancedOpen = false
     @Published var debugOpen = UserDefaults.standard.bool(forKey: BotViewModel.debugPrefsKey)
     @Published var subscribedAgents: Set<String> = []
+    @Published var vncOut = "—"
 
     private lazy var client: HubClient = HubClient(url: hubUrl, delegate: self)
     private let authSession = AuthSession.shared
@@ -412,6 +417,51 @@ final class BotViewModel: ObservableObject, HubClientDelegate {
                     self?.appendConversation("— transcript —\n\(text)")
                     self?.appendLog("transcriptTail refreshed")
                 case .failure(let e): self?.showErr(e)
+                }
+            }
+        }
+    }
+
+    /// MD1: bot.vncDescriptor → UIApplication.open / Safari; never claim real desktop.
+    func openDesktop() {
+        let id = selectedAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else {
+            lastError = "agentId required"
+            return
+        }
+        lastError = nil
+        client.vncDescriptor(agentId: id) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case .failure(let e):
+                    self.showErr(e)
+                case .success(let desc):
+                    let exp: String
+                    if let h = desc.expiresHint {
+                        exp = "expiresHint=\(h)"
+                    } else {
+                        exp = "expiresHint=null (无到期)"
+                    }
+                    // Honest: App only opened the URL; stub/proxy is server-side.
+                    self.vncOut = "opened externally · vncUrl=\(desc.vncUrl) · \(exp) · (App 不声称真桌面；过期再点重 mint)"
+                    self.appendLog("bot.vncDescriptor vncUrl=\(desc.vncUrl) \(exp)")
+                    guard let url = URL(string: desc.vncUrl) else {
+                        self.lastError = "invalid vncUrl"
+                        return
+                    }
+                    #if canImport(UIKit)
+                    UIApplication.shared.open(url, options: [:]) { ok in
+                        if !ok {
+                            Task { @MainActor in
+                                self.lastError = "external open failed"
+                                self.appendLog("[error] external open failed")
+                            }
+                        }
+                    }
+                    #else
+                    self.lastError = "UIApplication.open unavailable"
+                    #endif
                 }
             }
         }

@@ -101,6 +101,8 @@ ATLAS_GATEWAY_URL=http://127.0.0.1:8787 cargo run -p atlas-bot-hub
 PC：Connect → 选 agent → Chat 🖥 **或** 「更多/调试」**Open desktop** → `bot.vncDescriptor` → `window.open(vncUrl)`。  
 `expiresHint` 仍可见；过期后再点一次 Open desktop 刷新 descriptor（不改 IA）。
 
+**移动（MD1）：** 同构外开 — Android Custom Tabs / iOS `UIApplication.open`；见 `docs/mobile-user-guide.md` §5。 模拟器注意：Android 常把 `127.0.0.1` 理解成模拟器自身，对照时用 `10.0.2.2` 或真机局域网；**不**改 `{ vncUrl, expiresHint }` 形状。
+
 无显示 / 探活失败：打开的是 stub 页，**不会**写「已连接真桌面」。
 
 ---

@@ -52,6 +52,13 @@ data class DisplayError(
     val raw: Any? = null,
 )
 
+/** Result of hot Hub method bot.vncDescriptor — NOT a bot.command. */
+data class VncDescriptor(
+    val vncUrl: String,
+    /** Epoch millis; null = no expiry advertised. */
+    val expiresHint: Long? = null,
+)
+
 private val KNOWN_CODES = setOf(
     "command_rejected",
     "identity_unavailable",
@@ -140,6 +147,25 @@ object RpcFrames {
 
     fun transcriptTailArgs(agentId: String, limit: Int = 20): JSONObject =
         JSONObject().put("id", agentId).put("limit", limit)
+
+    /** Hot Hub method params — NOT a bot.command name. */
+    fun vncDescriptor(agentId: String): JSONObject =
+        JSONObject().put("agentId", agentId)
+
+    fun parseVncDescriptor(result: Any?): VncDescriptor {
+        val o = when (result) {
+            is JSONObject -> result
+            is Map<*, *> -> JSONObject(result)
+            else -> throw IllegalArgumentException("vncDescriptor result missing object")
+        }
+        val url = o.optString("vncUrl", "")
+        if (url.isEmpty()) throw IllegalArgumentException("vncDescriptor result missing vncUrl")
+        val hint: Long? = when {
+            !o.has("expiresHint") || o.isNull("expiresHint") -> null
+            else -> o.optLong("expiresHint")
+        }
+        return VncDescriptor(vncUrl = url, expiresHint = hint)
+    }
 }
 
 interface HubClientListener {
@@ -438,6 +464,24 @@ class HubClient(
         onErr: (DisplayError) -> Unit,
     ) {
         command(agentId, "getAgentTranscriptTail", RpcFrames.transcriptTailArgs(agentId, limit), onOk, onErr)
+    }
+
+    /**
+     * Hot Hub method bot.vncDescriptor — NOT a bot.command.
+     * Shape { vncUrl, expiresHint } unchanged; client opens vncUrl externally.
+     */
+    fun vncDescriptor(
+        agentId: String,
+        onOk: (VncDescriptor) -> Unit,
+        onErr: (DisplayError) -> Unit,
+    ) {
+        rpc("bot.vncDescriptor", RpcFrames.vncDescriptor(agentId), { r ->
+            try {
+                onOk(RpcFrames.parseVncDescriptor(r))
+            } catch (e: Exception) {
+                onErr(normalizeError(mapOf("message" to (e.message ?: "bad vncDescriptor result"))))
+            }
+        }, onErr)
     }
 
     companion object {
