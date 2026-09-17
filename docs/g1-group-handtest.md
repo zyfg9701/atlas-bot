@@ -2,7 +2,7 @@
 
 > 日期：2026-09-17 · 切片 **G1**（PC 优先）  
 > 基线：`zyfg9701/atlas-bot` · 零新 `bot.*` / 零新 command 名  
-> **非频道**（`connectChannel` 等另票 C1）· 非上架签名 · 非 GA2/YOLO/desktop 集群 · 非强制移动 · 非群套群 / fan-out / 删群
+> 频道已另刀 **C1**（`docs/c1-channel-handtest.md`）· 非上架签名 · 非 GA2/YOLO/desktop 集群 · 非强制移动 · 非群套群 / fan-out / 删群
 
 ## 后端范围
 
@@ -23,7 +23,7 @@
 | **G1-P5** | PC 建群 | 侧栏 Create group → 列表可选中（`[group]`） |
 | **G1-P6** | PC 改成员 | Change members 可达；刷新后成员对 |
 | **G1-P7** | 群上对话 | Subscribe / Send / transcript 不回归（单 transcript） |
-| **G1-P8** | 频道未做 | `connectChannel` 仍 Unknown/闭集 |
+| **G1-P8** | 频道 | 本刀交付时仍 Unknown；**现由 C1 覆盖** — 见 `docs/c1-channel-handtest.md` |
 | **G1-P9** | 文档 | 本页 + `pc-user-guide` §4.5；声明非频道/非上架/非 GA2·YOLO·集群 |
 | **G1-P10** | Box | 同形（本 PR 已跟） |
 

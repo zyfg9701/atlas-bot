@@ -97,7 +97,22 @@ app.innerHTML = `
           <button id="btnSetMembers" class="secondary" type="button" title="Apply selection to current group">Change members</button>
         </div>
       </div>
-      <p class="hint mono">Connect 后自动 listAgents；群显示 [group]。频道未做（C1）。</p>
+            <div class="channels-panel">
+        <h3 class="subh">Channels (C1 · local stub)</h3>
+        <p class="hint mono">本地 stub，未出网 — 非真连 Slack。Token 仅进 gateway 进程内存，reply 不回显；Disconnect 清除。进程重启丢失。</p>
+        <div id="channelManifest" class="mono channel-manifest">manifest: —</div>
+        <div id="channelConnections" class="mono channel-connections">connections: (none)</div>
+        <div class="row">
+          <input id="channelToken" type="password" placeholder="paste token (not stored in browser)" autocomplete="off" />
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="btnChannelConnect" type="button">Connect</button>
+          <button id="btnChannelDisconnect" class="secondary" type="button">Disconnect</button>
+          <button id="btnChannelRefresh" class="secondary" type="button">Refresh</button>
+        </div>
+        <div id="channelStatus" class="mono channel-status"></div>
+      </div>
+      <p class="hint mono">Connect 后自动 listAgents；群显示 [group]。Channels：上方 C1 Slack stub（本地未出网）。</p>
     </aside>
 
     <section class="chat-pane panel">
@@ -151,7 +166,7 @@ app.innerHTML = `
             <span class="hint mono">（主栏 Create 同逻辑）</span>
           </div>
           <div class="row">
-            <span class="hint mono">G1 createGroup / setGroupMembers：用侧栏「Create group」「Change members」（仍走 bot.command）。</span>
+            <span class="hint mono">G1 群 + C1 Channels：侧栏 Create group / Change members / Channels（仍走 bot.command；零新 bot.*）。</span>
           </div>
           <div class="mono" id="listOut"></div>
           <div class="mono" id="caps">capabilities: —</div>
@@ -225,6 +240,10 @@ const newNameEl = $<HTMLInputElement>("newName");
 const groupNameEl = $<HTMLInputElement>("groupName");
 const groupMembersEl = $<HTMLSelectElement>("groupMembers");
 const groupMetaEl = $("groupMeta");
+const channelManifestEl = $("channelManifest");
+const channelConnectionsEl = $("channelConnections");
+const channelTokenEl = $("channelToken") as HTMLInputElement;
+const channelStatusEl = $("channelStatus");
 const immediateEl = $<HTMLInputElement>("immediate");
 const logEl = $("log");
 const eventsEl = $("events");
@@ -503,6 +522,129 @@ function renderGroupMeta() {
   groupMetaEl.textContent = `group members: ${members || "(none)"}`;
 }
 
+type ChannelConnection = {
+  label?: string;
+  platform?: string;
+  status?: string;
+  detail?: string;
+};
+type ChannelManifest = {
+  platform?: string;
+  displayName?: string;
+  availability?: string;
+  blurb?: unknown;
+  connectGuide?: string;
+  credentialLabel?: unknown;
+};
+type SandChannelsView = {
+  connections?: ChannelConnection[];
+  manifests?: ChannelManifest[];
+};
+
+function copyText(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "object" && v && "text" in (v as object)) {
+    return String((v as { text?: unknown }).text ?? "");
+  }
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function renderChannelsView(view: SandChannelsView | null, note = "") {
+  const manifests = view?.manifests || [];
+  if (!manifests.length) {
+    channelManifestEl.textContent = "manifest: (none)";
+  } else {
+    const m = manifests[0];
+    channelManifestEl.textContent =
+      `manifest: ${m.displayName || m.platform || "?"} · ${m.availability || "?"} · ` +
+      `${copyText(m.credentialLabel) || "credential"} · ${copyText(m.blurb) || ""}`;
+  }
+  const conns = view?.connections || [];
+  if (!conns.length) {
+    channelConnectionsEl.textContent = "connections: (none)";
+  } else {
+    channelConnectionsEl.textContent = conns
+      .map(
+        (c) =>
+          `${c.platform || "?"} · ${c.status || "?"} · ${c.label || ""}` +
+          (c.detail ? ` · ${c.detail}` : ""),
+      )
+      .join("\n");
+  }
+  channelStatusEl.textContent = note;
+}
+
+async function refreshChannels() {
+  const id = currentAgentId();
+  try {
+    const view = (await ensureClient().getAgentChannels(id, id)) as SandChannelsView;
+    // Never log raw view if it somehow contained a token — strip defensively in UI path only.
+    renderChannelsView(view);
+    appendLog("info", "getAgentChannels", {
+      connections: (view.connections || []).map((c) => ({
+        platform: c.platform,
+        status: c.status,
+        label: c.label,
+        detail: c.detail,
+      })),
+      manifests: (view.manifests || []).map((m) => ({
+        platform: m.platform,
+        displayName: m.displayName,
+        availability: m.availability,
+      })),
+    });
+  } catch (e) {
+    renderChannelsView(null, "Channels unavailable (backend may not implement C1)");
+    throw e;
+  }
+}
+
+async function doChannelConnect() {
+  const id = currentAgentId();
+  const token = channelTokenEl.value; // do not trim-log; trim for empty check only
+  if (!token.trim()) {
+    showFail({ message: "token required", code: "upstream_error" });
+    return;
+  }
+  const view = (await ensureClient().connectChannel(id, id, "slack", token)) as SandChannelsView;
+  channelTokenEl.value = ""; // clear password field after submit
+  renderChannelsView(view, "connected (local stub, no egress)");
+  appendLog("info", "connectChannel ok (token omitted from log)", {
+    connections: (view.connections || []).map((c) => ({
+      platform: c.platform,
+      status: c.status,
+    })),
+  });
+}
+
+async function doChannelDisconnect() {
+  const id = currentAgentId();
+  const view = (await ensureClient().disconnectChannel(id, id, "slack")) as SandChannelsView;
+  renderChannelsView(view, "disconnected");
+  appendLog("info", "disconnectChannel", {
+    connections: view.connections || [],
+  });
+}
+
+async function doChannelRefresh() {
+  const id = currentAgentId();
+  const view = (await ensureClient().refreshChannel(id, id, "slack")) as SandChannelsView;
+  renderChannelsView(view, "refreshed (local stub, no egress probe)");
+  appendLog("info", "refreshChannel", {
+    connections: (view.connections || []).map((c) => ({
+      platform: c.platform,
+      status: c.status,
+      detail: c.detail,
+    })),
+  });
+}
+
+
 function renderAgentSelect() {
   const prev = agentEl.value;
   agentEl.innerHTML = "";
@@ -728,6 +870,9 @@ async function doListAgents() {
   listOut.textContent = JSON.stringify(r, null, 2);
   mergeKnownFromList(r);
   appendLog("info", "listAgents result", r);
+  void refreshChannels().catch(() => {
+    /* C1 optional on this backend */
+  });
   return r;
 }
 
@@ -884,6 +1029,9 @@ agentEl.onchange = () => {
   renderRoster(lastRoster);
   renderEvents();
   void refreshTail();
+  void refreshChannels().catch(() => {
+    /* backend may not implement C1 */
+  });
 };
 
 $("btnConnect").onclick = async () => {
@@ -1168,6 +1316,33 @@ $("btnSetMembers").onclick = async () => {
   clearFail();
   try {
     await doSetGroupMembers();
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnChannelConnect").onclick = async () => {
+  clearFail();
+  try {
+    await doChannelConnect();
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnChannelDisconnect").onclick = async () => {
+  clearFail();
+  try {
+    await doChannelDisconnect();
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnChannelRefresh").onclick = async () => {
+  clearFail();
+  try {
+    await doChannelRefresh();
   } catch (e) {
     showFail(e as DisplayError);
   }
