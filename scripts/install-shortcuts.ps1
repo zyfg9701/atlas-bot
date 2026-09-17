@@ -1,4 +1,4 @@
-# Write Start Menu (default) and optional Desktop shortcuts for an atlas-bot install root (T1).
+# Write Start Menu (default) and optional Desktop shortcuts for an atlas-bot install root (T1 + S1).
 # No admin. WorkingDirectory = install root (spaces-safe).
 # Usage:
 #   .\scripts\install-shortcuts.ps1 [-InstallRoot <path>] [-Desktop]
@@ -67,12 +67,17 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 
 $PcExe = Join-Path $InstallRoot 'pc\atlas-bot-pc.exe'
 $StartPs1 = Join-Path $InstallRoot 'scripts\start-cli-stack.ps1'
+$AtlasCmd = Join-Path $InstallRoot 'scripts\start-atlas.cmd'
+$AtlasPs1 = Join-Path $InstallRoot 'scripts\start-atlas.ps1'
 
 if (-not (Test-Path -LiteralPath $PcExe)) {
   Write-Host "warning: PC executable missing: $PcExe (shortcut still written)" -ForegroundColor Yellow
 }
 if (-not (Test-Path -LiteralPath $StartPs1)) {
   Write-Host "warning: start script missing: $StartPs1 (shortcut still written)" -ForegroundColor Yellow
+}
+if (-not (Test-Path -LiteralPath $AtlasCmd) -and -not (Test-Path -LiteralPath $AtlasPs1)) {
+  Write-Host "warning: S1 recipe missing: $AtlasCmd / $AtlasPs1 (shortcut still written)" -ForegroundColor Yellow
 }
 
 $Wsh = New-Object -ComObject WScript.Shell
@@ -132,6 +137,23 @@ New-AtlasShortcut `
   -WorkingDirectory $InstallRoot `
   -Description 'Start atlas-bot Hub+gateway (cli backend; binaries only — no cargo run)'
 
+# S1 one-click: prefer .cmd (ExecutionPolicy Bypass) else powershell -File start-atlas.ps1
+if (Test-Path -LiteralPath $AtlasCmd) {
+  New-AtlasShortcut `
+    -LnkPath (Join-Path $Programs 'atlas-bot Start (stack+PC).lnk') `
+    -TargetPath $AtlasCmd `
+    -WorkingDirectory $InstallRoot `
+    -Description 'S1 one-click: start CLI stack then PC (calls start-cli-stack; not atlas-desktop-stack)'
+} else {
+  $atlasArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$AtlasPs1`""
+  New-AtlasShortcut `
+    -LnkPath (Join-Path $Programs 'atlas-bot Start (stack+PC).lnk') `
+    -TargetPath $psExe `
+    -Arguments $atlasArgs `
+    -WorkingDirectory $InstallRoot `
+    -Description 'S1 one-click: start CLI stack then PC (calls start-cli-stack; not atlas-desktop-stack)'
+}
+
 if ($Desktop) {
   $DesktopDir = [Environment]::GetFolderPath('Desktop')
   New-AtlasShortcut `
@@ -146,6 +168,21 @@ if ($Desktop) {
     -Arguments $startArgs `
     -WorkingDirectory $InstallRoot `
     -Description 'Start atlas-bot Hub+gateway (cli backend)'
+  if (Test-Path -LiteralPath $AtlasCmd) {
+    New-AtlasShortcut `
+      -LnkPath (Join-Path $DesktopDir 'atlas-bot Start (stack+PC).lnk') `
+      -TargetPath $AtlasCmd `
+      -WorkingDirectory $InstallRoot `
+      -Description 'S1 one-click: start CLI stack then PC'
+  } else {
+    $atlasArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$AtlasPs1`""
+    New-AtlasShortcut `
+      -LnkPath (Join-Path $DesktopDir 'atlas-bot Start (stack+PC).lnk') `
+      -TargetPath $psExe `
+      -Arguments $atlasArgs `
+      -WorkingDirectory $InstallRoot `
+      -Description 'S1 one-click: start CLI stack then PC'
+  }
   Write-Host '    Desktop shortcuts enabled (-Desktop)'
 } else {
   Write-Host '    Desktop skipped (default Start Menu only; pass -Desktop to enable)'
@@ -154,5 +191,5 @@ if ($Desktop) {
 Write-Host ''
 Write-Host "Install root: $InstallRoot"
 Write-Host "Start Menu:   $Programs"
-Write-Host 'Next: click "atlas-bot Start CLI Stack", then "atlas-bot PC" → Connect → Send'
+Write-Host 'Next: click "atlas-bot Start (stack+PC)" (S1), or Start CLI Stack then PC → Connect → Send'
 Write-Host 'Unsigned / SmartScreen yellow is OK. Not a store package. For MSI see scripts/build-msi.ps1 (T2·W).'

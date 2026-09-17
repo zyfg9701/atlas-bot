@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Write ~/.local/share/applications/*.desktop for an atlas-bot install root (T1).
-# Optional but delivered: PC + Start CLI Stack entries.
+# Optional but delivered: PC + Start CLI Stack + Start (stack+PC) [S1] entries.
 # Usage:
 #   ./scripts/install-desktop-entry.sh [install-root]
 #   ATLAS_BOT_HOME=~/atlas-bot ./scripts/install-desktop-entry.sh
@@ -37,6 +37,7 @@ resolve_root() {
 ROOT="$(resolve_root "${1:-}")"
 PC_BIN="$ROOT/pc/atlas-bot-pc"
 START_SH="$ROOT/scripts/start-cli-stack.sh"
+ATLAS_SH="$ROOT/scripts/start-atlas.sh"
 APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$APPS"
 
@@ -80,6 +81,7 @@ fi
 
 PC_EXEC="$(desktop_escape "$PC_BIN")"
 START_EXEC="$(desktop_escape "$START_SH")"
+ATLAS_EXEC="$(desktop_escape "$ATLAS_SH")"
 PATH_KEY="$(desktop_escape "$ROOT")"
 
 if [[ ! -x "$PC_BIN" && -f "$PC_BIN" ]]; then
@@ -87,6 +89,9 @@ if [[ ! -x "$PC_BIN" && -f "$PC_BIN" ]]; then
 fi
 if [[ ! -x "$START_SH" && -f "$START_SH" ]]; then
   chmod +x "$START_SH" || true
+fi
+if [[ ! -x "$ATLAS_SH" && -f "$ATLAS_SH" ]]; then
+  chmod +x "$ATLAS_SH" || true
 fi
 
 cat > "$APPS/atlas-bot-pc.desktop" <<EOD
@@ -117,9 +122,24 @@ StartupNotify=false
 $ICON_KEY
 EOD
 
+cat > "$APPS/atlas-bot-start-stack-pc.desktop" <<EOD
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=atlas-bot Start (stack+PC)
+Comment=S1 one-click: start CLI stack then PC (calls start-cli-stack; not atlas-desktop-stack)
+Exec=$ATLAS_EXEC
+Path=$PATH_KEY
+Terminal=true
+Categories=Development;Utility;
+StartupNotify=false
+$ICON_KEY
+EOD
+
 echo "==> desktop entries → $APPS"
 echo "    atlas-bot-pc.desktop"
 echo "    atlas-bot-start-cli-stack.desktop"
+echo "    atlas-bot-start-stack-pc.desktop"
 echo "    Path=/WorkingDirectory: $ROOT"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -132,5 +152,5 @@ fi
 
 echo
 echo "Install root: $ROOT"
-echo "Next: start stack (menu or \"$START_SH\"), then open PC (menu or \"$PC_BIN\")"
+echo "Next: one-click Start (stack+PC) menu / \"$ATLAS_SH\", or Start CLI Stack then PC"
 echo "Unsigned / Gatekeeper yellow is OK. Not a store package. Win MSI: scripts/build-msi.ps1 (T2-W)."

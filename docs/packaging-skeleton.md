@@ -1,8 +1,9 @@
-# Packaging / install skeleton (P1) + installer thickening (T1) + T2 MSI
+# Packaging / install skeleton (P1) + installer thickening (T1) + T2 MSI + S1 one-click
 
 > Date: 2026-09-11 · baseline `main`@`fde2a6c`  
 > Goal: unify `dist/` + cargo/tauri collection + install/start scripts for Hub+gateway(+cli)+PC; **T1** adds portable zip/tar.gz archives + Win Start Menu shortcuts + Unix `.desktop` entries; **T2·W / MSI1** adds WiX v4 per-user MSI + ARP (zip retained).  
-> **Still not:** store listing, code signing / notarization, WeCom tickets, NSIS/DEB/RPM, auto-update, packaging external `agent`, `bot.*` changes, forced admin / Program Files.
+> **Still not:** store listing, code signing / notarization, WeCom tickets, NSIS/DEB/RPM, auto-update, packaging external `agent`, `bot.*` changes, forced admin / Program Files,
+> C1-real, GA2/YOLO, `atlas-desktop-stack` (VNC/D1), rewriting `start-cli-stack`, putting `cargo run` in recipes.
 
 Acceptance: knowledge-handoff `feitian-t2-msi-acceptance.md` · feasibility `pangu-t2-msi-feasibility.md`  
 (T1: `feitian-installer-thickening-acceptance.md`; P1: `feitian-packaging-install-skeleton-acceptance.md`)
@@ -15,7 +16,7 @@ Acceptance: knowledge-handoff `feitian-t2-msi-acceptance.md` · feasibility `pan
 dist/                          # produced by scripts/pack-dist.* (gitignored binaries)
   bin/                         # atlas-bot-hub, atlas-bot-gateway, atlas-bot-cli (default)
   pc/                          # unsigned Tauri executable (atlas-bot-pc[.exe])
-  scripts/                     # start-cli-stack.* + install-shortcuts.ps1 + install-desktop-entry.sh
+  scripts/                     # start-atlas.* (S1) + start-cli-stack.* + install-shortcuts / install-desktop-entry
   README-INSTALL.md
 
 artifacts/                     # produced by archive-dist / build-msi (gitignored)
@@ -27,6 +28,7 @@ artifacts/                     # produced by archive-dist / build-msi (gitignore
 packaging/templates/           # sources copied into dist/ by pack
   README-INSTALL.md
   scripts/start-cli-stack.*
+  scripts/start-atlas.*         # S1 one-click recipe (+ .cmd on Win)
 
 packaging/wix/                 # T2·W WiX v4 sources (Product / Components / Shortcuts)
   Product.wxs · Components.wxs · Shortcuts.wxs · README.md
@@ -125,6 +127,7 @@ Unsigned: Windows SmartScreen / macOS Gatekeeper yellow is OK — see `dist/READ
 - Default: **Start Menu only** → `%APPDATA%\Microsoft\Windows\Start Menu\Programs\atlas-bot\`
   - `atlas-bot PC.lnk` → `pc\atlas-bot-pc.exe`
   - `atlas-bot Start CLI Stack.lnk` → `powershell -NoProfile -ExecutionPolicy Bypass -File …\scripts\start-cli-stack.ps1`
+  - `atlas-bot Start (stack+PC).lnk` → `scripts\start-atlas.cmd` (S1; keeps the two above)
 - `WorkingDirectory` = install root (spaces-safe, quoted `-File` path)
 - Desktop: opt-in via `install-local.ps1 -Desktop` or `install-shortcuts.ps1 -Desktop`
 - Hook: `install-local.ps1` calls `install-shortcuts.ps1`; archive also carries the helper for unpack-only
@@ -133,6 +136,7 @@ Unsigned: Windows SmartScreen / macOS Gatekeeper yellow is OK — see `dist/READ
 
 - Writes `~/.local/share/applications/atlas-bot-pc.desktop`
 - Also writes `atlas-bot-start-cli-stack.desktop` (Terminal=true) — Start stack is a **second `.desktop`**, not README-only
+- S1: also writes `atlas-bot-start-stack-pc.desktop` → `scripts/start-atlas.sh` (third entry; keeps the two above)
 - `Exec=` / `Path=` pin install root (desktop-entry `\s` escaping for spaces)
 - `update-desktop-database` best-effort (failure ignored)
 - Hook: `install-local.sh` calls `install-desktop-entry.sh` (skip with `ATLAS_BOT_SKIP_DESKTOP=1`)
@@ -209,6 +213,10 @@ Silent: `msiexec /i … /qn`. Optional Desktop shortcuts (default **off**):
 **Evidence on this Linux pack host:** WiX sources + `build-msi.ps1` + docs reviewed; real `.msi` / MSI-P1–P5 → **「Win 机待补」**.
 
 ## One-liners
+
+### Prefer after install (S1)
+
+Unix: `~/atlas-bot/scripts/start-atlas.sh`  ·  Win: `& "$env:LOCALAPPDATA\atlas-bot\scripts\start-atlas.cmd"`
 
 ### After pack (P1 path)
 
@@ -295,6 +303,90 @@ msiexec /i .\artifacts\atlas-bot-*-windows-x64.msi
 | **T-P1–T-P3** | `.\scripts\archive-dist.ps1` → expand → `install-shortcuts.ps1` → Start Menu PC + Start Stack. |
 
 ---
+
+---
+
+## S1 · One-click stack recipe
+
+> Slice name **S1** (Stack recipe). **Not** `atlas-desktop-stack` / VNC / D1.
+> **Not** signing, updater, store, C1-real, GA2/YOLO, desktop cluster, bundling `agent`.
+
+### What it does
+
+Thin wrapper at install/unpack root:
+
+1. Resolve install root (same WorkingDirectory as T1 shortcuts)
+2. Probe `ATLAS_AGENT_CLI` or PATH `agent` — missing → **non-zero** + human message
+3. **Call** existing `scripts/start-cli-stack.*` (no copied start logic; **no** `cargo run`)
+4. Wait gateway + Hub `/healthz` with **`backend=cli`**
+5. Default: launch `pc/atlas-bot-pc[.exe]`; **SkipPc** via `--skip-pc` / `-SkipPc` / `ATLAS_SKIP_PC=1`
+6. Print Connect next steps (`ws://127.0.0.1:7700/ws`) + logs/PIDs
+
+### Files
+
+| Role | Path |
+|------|------|
+| Unix recipe | `packaging/templates/scripts/start-atlas.sh` → pack → `dist/scripts/` |
+| Win recipe | `packaging/templates/scripts/start-atlas.ps1` (+ `start-atlas.cmd` Bypass wrapper) |
+| Pack | `scripts/pack-dist.*` copies recipe into `dist/scripts/` (same discipline as start-cli-stack) |
+| Entries | third Start Menu / `.desktop`: **Start (stack+PC)**; keeps PC + Start CLI Stack |
+| MSI | `packaging/wix/Shortcuts.wxs` third Shortcut → `start-atlas.cmd` (UpgradeCode unchanged) |
+
+### Relation to `start-cli-stack`
+
+| | `start-cli-stack.*` | `start-atlas.*` (S1) |
+|--|---------------------|----------------------|
+| Starts Hub+gateway from `bin/*` | yes | **calls** start-cli-stack |
+| healthz `backend=cli` | yes | verifies after call |
+| Launches PC | no (prints hint) | yes (unless SkipPc) |
+| Foreground hold | yes (Ctrl-C stops) | backgrounds stack, then returns after PC/SkipPc |
+| `cargo run` | never | never |
+
+### Cut line vs `atlas-desktop-stack`
+
+| | S1 `start-atlas.*` | `scripts/atlas-desktop-stack.sh` |
+|--|--------------------|-----------------------------------|
+| Purpose | Hub+gateway cli stack + optional PC | Xvfb + x11vnc desktop (D1) |
+| Entry | install root `scripts/` | repo `scripts/` (not the stranger one-click) |
+| Do not mix names in docs/PR titles | — | — |
+
+### One-liners (S1)
+
+Unix:
+
+```bash
+~/atlas-bot/scripts/start-atlas.sh
+# CI / headless:
+~/atlas-bot/scripts/start-atlas.sh --skip-pc
+```
+
+Windows:
+
+```powershell
+& "$env:LOCALAPPDATA\atlas-bot\scripts\start-atlas.cmd"
+& "$env:LOCALAPPDATA\atlas-bot\scripts\start-atlas.ps1" -SkipPc
+```
+
+### Declared non-goals (S1)
+
+Signing / clearing SmartScreen, auto-update, store listing, C1-real Slack egress, GA2/YOLO, VNC/desktop cluster, packing external `agent`, rewriting `start-cli-stack`, any `bot.*` / Hub / gateway / PC UI business changes.
+
+### Hand-test (S1-P*)
+
+| ID | Step | Expect |
+|----|------|--------|
+| **S1-P1** | Unix recipe at install/unpack root | agent present → stack → healthz `backend=cli` → (or SkipPc) ok; Connect printed |
+| **S1-P2** | Win recipe (structure or machine) | same shape; `.cmd` Bypass path readable |
+| **S1-P3** | no agent | non-zero + human message; no fake stack |
+| **S1-P4** | missing bin / start-cli-stack | non-zero + human message |
+| **S1-P5** | SkipPc | no PC; healthz ok (CI/headless) |
+| **S1-P6** | default PC (with display) | PC process or diagnosable failure |
+| **S1-P7** | `rg 'cargo run' packaging/templates/scripts/start-atlas.*` | no matches |
+| **S1-P8** | entries | PC + Start CLI Stack retained; third points at recipe |
+| **S1-P9** | docs | README main path elevated; this §S1; cut desktop; refuse signing/updater/store/C1-real/GA2·YOLO·cluster |
+| **S1-P10** | regression | no crates business diff; license / bot-relay / hub-smoke not reddened by this knife |
+| **S1-P11** | MSI | WiX third Shortcut and/or docs for MSI users running `scripts\start-atlas.cmd` |
+
 
 ## Related
 
