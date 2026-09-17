@@ -19,7 +19,7 @@
 |----------|------|
 | 顶栏连接态 + Connect/Disconnect | `hello` 后 badge → ready |
 | 高级折叠 | Hub WS、Bearer 粘贴 |
-| Agent 侧栏 | 下拉 + Create |
+| Agent 侧栏 | 下拉 + Create agent + **Create group** / Change members（G1） |
 | Conversation | 合并展示 transcript tail + 订阅到的 tool/delta 等事件 |
 | Composer | Send / Interrupt / immediate |
 | 错误条 | 有 Failure 才显示 |
@@ -33,7 +33,7 @@
 | 调试区块 | 入口 |
 |----------|------|
 | Cold | status / roster / offbox / offbox next |
-| Protocol | subscribe / unsubscribe / getTail / listAgents / createAgent |
+| Protocol | subscribe / unsubscribe / getTail / listAgents / createAgent；群组走侧栏 createGroup / setGroupMembers |
 | 连接信息 | capabilities、connection_id |
 | Desktop · attachments | Open desktop、uploadAttachment、attachUpload |
 | Raw panes + Log | Events、Hot transcript、完整 Log |
@@ -99,12 +99,24 @@ cd clients/pc && npm i && npm run tauri dev
 | Connect / hello / capabilities | 主屏顶栏；caps 在调试 |
 | Bearer / Login (OIDC PKCE) | 高级 + 顶栏 Login；生产靠 Tauri `connect_ws` |
 | Cold status/roster/offbox | 调试 |
-| list / create / subscribe / send / interrupt / tail | 主屏自动 + 调试细按钮 |
+| list / create / **createGroup / setGroupMembers** / subscribe / send / interrupt / tail | 主屏自动 + 侧栏群组 + 调试细按钮 |
 | Events / transcript | 主屏合并流；调试保留原面板 |
 | VNC / upload / attach | composer 图标 + 调试 |
 | Failure / Log | 错误条 + 调试 Log |
 
-**还不是：** 品牌视觉系统、群组、上架包、I2.2 移动取票、React/Vue 重写。
+**还不是：** 品牌视觉系统、**频道**（`connectChannel` 等，另票 C1）、上架包、强制移动建群 UI、群套群 / fan-out 编排、删群产品化、I2.2 移动取票、React/Vue 重写、GA2/YOLO/desktop 集群。
+
+**G1 已交付（PC）：** 侧栏 **Create group**（name + 多选已有非群 agent）→ 列表带 `[group]` 标记并可自动选中；选中群可见成员；**Change members** 改成员；对群 agentId 既有 Subscribe/Send/transcript 不回归。零新 `bot.*`（仅 catalog `createGroup` / `setGroupMembers` 经 `bot.command`）。Gateway：**InMemory + Box** 同形；**CLI / OpenAI** 本刀未跟（对该后端群命令仍 `UnknownMethod` 闭集拒绝，不装成功）。
+
+---
+
+## 4.5 G1 建群三步（PC · Hub-only / stub 或 Box）
+
+1. **Connect** → 确保已有 ≥1 非群 agent（默认 `agt_1`，或侧栏 Create）。  
+2. 侧栏填 **group name**，在 Members 多选框勾选成员 → **Create group** → 列表出现带 `[group]` 的项并选中。  
+3. 改成员：选中群 → 调整 Members 多选 → **Change members**；`group members:` 行与再 `listAgents` 一致。
+
+群上对话与单 agent 相同（单 transcript stub/echo；**非**多成员 fan-out）。手测见 [`docs/g1-group-handtest.md`](./g1-group-handtest.md)。
 
 ---
 
@@ -135,6 +147,7 @@ cd clients/pc && npm i && npm run tauri dev
 ## 7. 相关文档
 
 - U1 手测：`docs/pc-ui-u1-checklist.md`  
+- G1 群组手测：[`docs/g1-group-handtest.md`](./g1-group-handtest.md)  
 - **主路径：** [`docs/cli-primary-runbook.md`](./cli-primary-runbook.md)  
 - Windows 起栈：[`docs/windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
 - 阶段 runbook：`docs/P*-runbook.md`、`docs/p1-desktop-runbook.md`、`docs/i2-login-runbook.md`、`docs/b1-event-ingest-runbook.md`  

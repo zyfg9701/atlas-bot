@@ -40,7 +40,8 @@ use crate::tool_approval::{
     format_pending_summary, ApprovalDecision, ApprovalState, GateOutcome, ToolApprovalMode,
 };
 use crate::{
-    is_expired, mint_vnc_descriptor_probed, now_ms, AgentRecord, Gateway, GatewayError, RuntimeHint,
+    agent_summary_value, is_expired, mint_vnc_descriptor_probed, now_ms, parse_member_agent_ids,
+    validate_group_members, AgentRecord, Gateway, GatewayError, RuntimeHint,
     TranscriptEntry, VncMode, VncTokenError, VncTokenRecord, ATTACHMENT_OBJECT_MAX_BYTES,
     BOX_TEXT_FILE_MAX_BYTES, DEFAULT_AGENT_ID, DEFAULT_AGENT_NAME, DEFAULT_ATTACH_TTL_SECS,
     DEFAULT_VNC_STUB_BASE, ENV_ATTACH_TTL_SECS, ENV_VNC_MODE, ENV_VNC_UPSTREAM,
@@ -369,6 +370,8 @@ impl BoxSidecarGateway {
                 description: "R2 box sidecar agent".to_string(),
                 is_running: false,
                 created_at: 1_700_000_000_000.0,
+                is_group: false,
+                member_ids: Vec::new(),
             },
         );
         let mut transcripts = HashMap::new();
@@ -551,21 +554,7 @@ impl BoxSidecarGateway {
     }
 
     fn agent_summary(a: &AgentRecord) -> Value {
-        json!({
-            "id": a.id,
-            "name": a.name,
-            "description": a.description,
-            "isRunning": a.is_running,
-            "isActive": true,
-            "isGroup": false,
-            "hasUnread": false,
-            "isComposingMessage": false,
-            "createdAt": a.created_at,
-            "avatarDataUrl": Value::Null,
-            "awaitingUserResponse": Value::Null,
-            "lastEntry": Value::Null,
-            "lastMessageId": Value::Null,
-        })
+        agent_summary_value(a)
     }
 
     fn publish_hint(&self, hint: RuntimeHint) {
@@ -659,6 +648,8 @@ impl BoxSidecarGateway {
             description,
             is_running: false,
             created_at,
+            is_group: false,
+            member_ids: Vec::new(),
         };
         let seed = TranscriptEntry {
             id: format!("msg_seed_{id}"),
@@ -677,6 +668,79 @@ impl BoxSidecarGateway {
             "transcript": [seed],
             "agentId": id,
         }))
+    }
+
+    async fn create_group(&self, args: &Value) -> Result<Value, GatewayError> {
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing name".into()))?
+            .to_string();
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let member_ids = parse_member_agent_ids(args)?;
+        let mut guard = self.shared.inner.write().await;
+        validate_group_members(&guard.agents, &member_ids)?;
+        let n = guard.next_agent_n;
+        guard.next_agent_n += 1;
+        let id = format!("agt_{n}");
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0);
+        let record = AgentRecord {
+            id: id.clone(),
+            name: name.clone(),
+            description,
+            is_running: false,
+            created_at,
+            is_group: true,
+            member_ids: member_ids.clone(),
+        };
+        let seed = TranscriptEntry {
+            id: format!("msg_seed_{id}"),
+            role: "assistant".to_string(),
+            text: format!("group {name} ready"),
+            seq: 1,
+        };
+        guard.agents.insert(id.clone(), record.clone());
+        guard.transcripts.insert(id.clone(), vec![seed.clone()]);
+        guard.next_entry_seq.insert(id.clone(), 2);
+        guard.history.insert(id.clone(), Vec::new());
+        drop(guard);
+        self.ensure_agent_workspace(&id);
+        Ok(json!({
+            "agent": Self::agent_summary(&record),
+            "transcript": [seed],
+            "agentId": id,
+        }))
+    }
+
+    async fn set_group_members(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = args
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing id".into()))?
+            .to_string();
+        let member_ids = parse_member_agent_ids(args)?;
+        let mut guard = self.shared.inner.write().await;
+        let Some(existing) = guard.agents.get(&id) else {
+            return Err(GatewayError::InvalidArgs(format!("unknown group id: {id}")));
+        };
+        if !existing.is_group {
+            return Err(GatewayError::InvalidArgs(format!("not a group: {id}")));
+        }
+        validate_group_members(&guard.agents, &member_ids)?;
+        let a = guard.agents.get_mut(&id).expect("checked");
+        a.member_ids = member_ids;
+        Ok(Self::agent_summary(a))
     }
 
     async fn mark_running(&self, agent_id: &str) -> Result<(), GatewayError> {
@@ -1549,6 +1613,8 @@ impl BoxSidecarGateway {
         match name {
             "listAgents" => self.list_agents().await,
             "createAgent" => self.create_agent(&args).await,
+            "createGroup" => self.create_group(&args).await,
+            "setGroupMembers" => self.set_group_members(&args).await,
             "sendPrompt" => self.send_prompt(agent_id, &args).await,
             "interruptAgentRun" => self.interrupt_agent_run(agent_id, &args).await,
             "getAgentTranscriptTail" => self.get_transcript_tail(agent_id, &args).await,
@@ -1814,6 +1880,50 @@ fn scan_unknown_run_commands(prompt: &str) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn box_create_group_and_set_members() {
+        let root = std::env::temp_dir().join(format!(
+            "atlas-box-g1-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let gw = BoxSidecarGateway::new(root.clone(), Duration::from_millis(5));
+        let scout = gw
+            .invoke("agt_1", "createAgent", json!({ "name": "Scout" }))
+            .await
+            .unwrap();
+        let sid = scout["agentId"].as_str().unwrap().to_string();
+        let group = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({ "name": "Crew", "memberAgentIds": ["agt_1", sid] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(group["agent"]["isGroup"], true);
+        let gid = group["agentId"].as_str().unwrap().to_string();
+        let updated = gw
+            .invoke(
+                "agt_1",
+                "setGroupMembers",
+                json!({ "id": gid, "memberAgentIds": [sid] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["memberIds"], json!([sid]));
+        let err = gw
+            .invoke(
+                "agt_1",
+                "connectChannel",
+                json!({ "id": gid, "platform": "slack", "token": "x" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::UnknownMethod(_)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[tokio::test]
     async fn multi_turn_references_prior() {

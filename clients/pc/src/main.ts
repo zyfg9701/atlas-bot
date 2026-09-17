@@ -80,11 +80,24 @@ app.innerHTML = `
       <div class="row">
         <select id="agentId" aria-label="Select agent"></select>
       </div>
+      <div id="groupMeta" class="mono group-meta" hidden></div>
       <div class="row">
         <input id="newName" placeholder="new agent name" value="Scout" />
         <button id="btnCreateMain" type="button">Create</button>
       </div>
-      <p class="hint mono">Connect 后自动 listAgents；发送时自动 subscribe。</p>
+      <div class="group-create">
+        <h3 class="subh">Create group (G1)</h3>
+        <div class="row">
+          <input id="groupName" placeholder="group name" value="Crew" />
+        </div>
+        <label class="hint mono" for="groupMembers">Members · multi-select (≥1 non-group)</label>
+        <select id="groupMembers" multiple size="4" aria-label="Group members"></select>
+        <div class="row" style="margin-top:8px">
+          <button id="btnCreateGroup" type="button">Create group</button>
+          <button id="btnSetMembers" class="secondary" type="button" title="Apply selection to current group">Change members</button>
+        </div>
+      </div>
+      <p class="hint mono">Connect 后自动 listAgents；群显示 [group]。频道未做（C1）。</p>
     </aside>
 
     <section class="chat-pane panel">
@@ -136,6 +149,9 @@ app.innerHTML = `
           <div class="row">
             <button id="btnCreate" type="button">createAgent</button>
             <span class="hint mono">（主栏 Create 同逻辑）</span>
+          </div>
+          <div class="row">
+            <span class="hint mono">G1 createGroup / setGroupMembers：用侧栏「Create group」「Change members」（仍走 bot.command）。</span>
           </div>
           <div class="mono" id="listOut"></div>
           <div class="mono" id="caps">capabilities: —</div>
@@ -206,6 +222,9 @@ const rosterEl = $("roster");
 const agentEl = $<HTMLSelectElement>("agentId");
 const promptEl = $<HTMLTextAreaElement>("prompt");
 const newNameEl = $<HTMLInputElement>("newName");
+const groupNameEl = $<HTMLInputElement>("groupName");
+const groupMembersEl = $<HTMLSelectElement>("groupMembers");
+const groupMetaEl = $("groupMeta");
 const immediateEl = $<HTMLInputElement>("immediate");
 const logEl = $("log");
 const eventsEl = $("events");
@@ -320,7 +339,13 @@ let sessionToken: string | undefined;
 
 const events: BotEventEnvelope[] = [];
 let client: HubClient | null = null;
-let knownAgents: { id: string; name: string }[] = [{ id: "agt_1", name: "Watcher" }];
+type KnownAgent = {
+  id: string;
+  name: string;
+  isGroup?: boolean;
+  memberIds?: string[];
+};
+let knownAgents: KnownAgent[] = [{ id: "agt_1", name: "Watcher", isGroup: false, memberIds: [] }];
 let offboxNextCursor: string | null | undefined = undefined;
 let lastRoster: RosterEntry[] = [];
 let lastUploadId: string | null = null;
@@ -435,13 +460,56 @@ function currentAgentId(): string {
   return agentEl.value || "agt_1";
 }
 
+function agentLabel(a: KnownAgent): string {
+  const tag = a.isGroup ? " [group]" : "";
+  return `${a.id} · ${a.name}${tag}`;
+}
+
+function renderMemberMultiSelect(preserveSelected = true) {
+  const prev = preserveSelected
+    ? new Set(
+        [...groupMembersEl.selectedOptions].map((o) => o.value),
+      )
+    : new Set<string>();
+  // Prefer current group's members when selecting a group
+  const cur = knownAgents.find((a) => a.id === agentEl.value);
+  if (cur?.isGroup && cur.memberIds?.length && !prev.size) {
+    for (const id of cur.memberIds) prev.add(id);
+  }
+  groupMembersEl.innerHTML = "";
+  for (const a of knownAgents.filter((x) => !x.isGroup)) {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = `${a.id} · ${a.name}`;
+    if (prev.has(a.id)) opt.selected = true;
+    groupMembersEl.appendChild(opt);
+  }
+}
+
+function renderGroupMeta() {
+  const cur = knownAgents.find((a) => a.id === agentEl.value);
+  if (!cur?.isGroup) {
+    groupMetaEl.hidden = true;
+    groupMetaEl.textContent = "";
+    return;
+  }
+  const members = (cur.memberIds || [])
+    .map((id) => {
+      const m = knownAgents.find((x) => x.id === id);
+      return m ? `${m.id}(${m.name})` : id;
+    })
+    .join(", ");
+  groupMetaEl.hidden = false;
+  groupMetaEl.textContent = `group members: ${members || "(none)"}`;
+}
+
 function renderAgentSelect() {
   const prev = agentEl.value;
   agentEl.innerHTML = "";
   for (const a of knownAgents) {
     const opt = document.createElement("option");
     opt.value = a.id;
-    opt.textContent = `${a.id} · ${a.name}`;
+    opt.textContent = agentLabel(a);
     agentEl.appendChild(opt);
   }
   if (prev && knownAgents.some((a) => a.id === prev)) {
@@ -449,13 +517,22 @@ function renderAgentSelect() {
   } else if (knownAgents.length) {
     agentEl.value = knownAgents[0].id;
   }
+  renderMemberMultiSelect();
+  renderGroupMeta();
 }
 
 function mergeKnownFromRoster(agents: RosterEntry[]) {
   for (const a of agents) {
     const idx = knownAgents.findIndex((x) => x.id === a.agentId);
-    if (idx >= 0) knownAgents[idx] = { id: a.agentId, name: a.name };
-    else knownAgents.push({ id: a.agentId, name: a.name });
+    if (idx >= 0) {
+      knownAgents[idx] = {
+        ...knownAgents[idx],
+        id: a.agentId,
+        name: a.name,
+      };
+    } else {
+      knownAgents.push({ id: a.agentId, name: a.name, isGroup: false, memberIds: [] });
+    }
   }
   knownAgents.sort((a, b) => a.id.localeCompare(b.id));
   renderAgentSelect();
@@ -469,12 +546,21 @@ function mergeKnownFromList(list: unknown) {
     const id = String(o.id ?? "");
     const name = String(o.name ?? id);
     if (!id) continue;
+    const isGroup = o.isGroup === true;
+    const memberIds = Array.isArray(o.memberIds)
+      ? o.memberIds.map((x) => String(x))
+      : [];
+    const next: KnownAgent = { id, name, isGroup, memberIds };
     const idx = knownAgents.findIndex((x) => x.id === id);
-    if (idx >= 0) knownAgents[idx] = { id, name };
-    else knownAgents.push({ id, name });
+    if (idx >= 0) knownAgents[idx] = { ...knownAgents[idx], ...next };
+    else knownAgents.push(next);
   }
   knownAgents.sort((a, b) => a.id.localeCompare(b.id));
   renderAgentSelect();
+}
+
+function selectedMemberIds(): string[] {
+  return [...groupMembersEl.selectedOptions].map((o) => o.value);
 }
 
 function formatEventLine(e: BotEventEnvelope): string {
@@ -649,18 +735,105 @@ async function doCreateAgent() {
   const name = newNameEl.value.trim() || "Agent";
   const r = (await ensureClient().createAgent(currentAgentId(), name)) as {
     agentId?: string;
-    agent?: { id?: string; name?: string };
+    agent?: { id?: string; name?: string; isGroup?: boolean; memberIds?: string[] };
   };
   appendLog("info", "createAgent result", r);
   const id = r.agentId || r.agent?.id;
   if (id) {
-    mergeKnownFromList([{ id, name: r.agent?.name || name }]);
+    mergeKnownFromList([
+      {
+        id,
+        name: r.agent?.name || name,
+        isGroup: false,
+        memberIds: [],
+      },
+    ]);
     agentEl.value = id;
     const ro = await ensureClient().roster();
     mergeKnownFromRoster(ro.agents || []);
     renderRoster(ro.agents || []);
     await ensureClient().subscribe([id]);
   }
+}
+
+async function doCreateGroup() {
+  const name = groupNameEl.value.trim();
+  const memberAgentIds = selectedMemberIds();
+  if (!name) {
+    showFail({ message: "group name required", code: "upstream_error" });
+    return;
+  }
+  if (!memberAgentIds.length) {
+    showFail({ message: "select ≥1 member agent", code: "upstream_error" });
+    return;
+  }
+  const r = (await ensureClient().createGroup(currentAgentId(), name, memberAgentIds)) as {
+    agentId?: string;
+    agent?: {
+      id?: string;
+      name?: string;
+      isGroup?: boolean;
+      memberIds?: string[];
+    };
+  };
+  appendLog("info", "createGroup result", r);
+  const id = r.agentId || r.agent?.id;
+  if (!id) {
+    showFail({ message: "createGroup returned no id", code: "upstream_error", raw: r });
+    return;
+  }
+  // Prefer listAgents refresh so isGroup/memberIds match gateway
+  try {
+    await doListAgents();
+  } catch {
+    mergeKnownFromList([
+      {
+        id,
+        name: r.agent?.name || name,
+        isGroup: true,
+        memberIds: r.agent?.memberIds || memberAgentIds,
+      },
+    ]);
+  }
+  agentEl.value = id;
+  renderAgentSelect();
+  await ensureClient().subscribe([id]);
+  void refreshTail();
+}
+
+async function doSetGroupMembers() {
+  const id = currentAgentId();
+  const cur = knownAgents.find((a) => a.id === id);
+  if (!cur?.isGroup) {
+    showFail({ message: "select a group first", code: "upstream_error" });
+    return;
+  }
+  const memberAgentIds = selectedMemberIds();
+  if (!memberAgentIds.length) {
+    showFail({ message: "select ≥1 member agent", code: "upstream_error" });
+    return;
+  }
+  const r = (await ensureClient().setGroupMembers(id, id, memberAgentIds)) as {
+    id?: string;
+    isGroup?: boolean;
+    memberIds?: string[];
+    name?: string;
+  };
+  appendLog("info", "setGroupMembers result", r);
+  try {
+    await doListAgents();
+  } catch {
+    mergeKnownFromList([
+      {
+        id,
+        name: r.name || cur.name,
+        isGroup: true,
+        memberIds: r.memberIds || memberAgentIds,
+      },
+    ]);
+  }
+  agentEl.value = id;
+  renderAgentSelect();
 }
 
 async function doVnc() {
@@ -706,6 +879,8 @@ agentEl.onchange = () => {
   offboxEl.textContent = "";
   lastTailRaw = null;
   transcriptEl.textContent = "";
+  renderMemberMultiSelect(false);
+  renderGroupMeta();
   renderRoster(lastRoster);
   renderEvents();
   void refreshTail();
@@ -975,6 +1150,24 @@ $("btnCreateMain").onclick = async () => {
   clearFail();
   try {
     await doCreateAgent();
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnCreateGroup").onclick = async () => {
+  clearFail();
+  try {
+    await doCreateGroup();
+  } catch (e) {
+    showFail(e as DisplayError);
+  }
+};
+
+$("btnSetMembers").onclick = async () => {
+  clearFail();
+  try {
+    await doSetGroupMembers();
   } catch (e) {
     showFail(e as DisplayError);
   }

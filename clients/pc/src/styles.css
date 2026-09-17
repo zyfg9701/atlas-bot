@@ -230,3 +230,22 @@ ul.agents li.selected { border-color: var(--accent); background: #1c2a40; }
 .approval-title { font-weight: 600; margin-bottom: 6px; color: var(--warn); }
 .approval-body { font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; white-space: pre-wrap; max-height: 6em; overflow: auto; }
 .approval-actions { display: flex; gap: 8px; }
+
+/* G1 group sidebar */
+.group-create {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.group-create select[multiple] {
+  width: 100%;
+  min-height: 5.5rem;
+  font-size: 0.8rem;
+}
+.group-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

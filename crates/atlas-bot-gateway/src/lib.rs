@@ -5,10 +5,11 @@
 //! - [`OpenAiCompatGateway`] — optional OpenAI-compat fallback
 //! - [`BoxSidecarGateway`] — R1/R2/RR1 Box Sidecar (tools + optional LLM + VNC/attach)
 //!
-//! Hot commands: `listAgents`, `createAgent`, `sendPrompt`,
-//! `getAgentTranscriptTail`, `interruptAgentRun`, `uploadAttachment`,
-//! `attachUpload`. Other catalog names return [`GatewayError::UnknownMethod`]
-//! which the hub maps to `command_rejected` / `gateway/unknown-method`.
+//! Hot commands: `listAgents`, `createAgent`, `createGroup`, `setGroupMembers`,
+//! `sendPrompt`, `getAgentTranscriptTail`, `interruptAgentRun`,
+//! `uploadAttachment`, `attachUpload`. Other catalog names (incl. channel
+//! family) return [`GatewayError::UnknownMethod`] which the hub maps to
+//! `command_rejected` / `gateway/unknown-method`.
 //!
 //! VNC is **not** a command name: Hub calls [`Gateway::vnc_descriptor`] for
 //! `bot.vncDescriptor`. Modes: `ATLAS_VNC_MODE=stub|proxy` (default stub);
@@ -271,6 +272,81 @@ pub struct AgentRecord {
     pub description: String,
     pub is_running: bool,
     pub created_at: f64,
+    /// G1: true for group agents created via `createGroup`.
+    #[serde(default)]
+    pub is_group: bool,
+    /// G1: member agent ids when `is_group` (never nests groups).
+    #[serde(default)]
+    pub member_ids: Vec<String>,
+}
+
+
+/// Normalize `memberAgentIds` from createGroup / setGroupMembers args.
+/// Rejects missing/empty lists; dedupes + sorts for stable set equality.
+pub fn parse_member_agent_ids(args: &Value) -> Result<Vec<String>, GatewayError> {
+    let arr = args
+        .get("memberAgentIds")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| GatewayError::InvalidArgs("missing memberAgentIds".into()))?;
+    if arr.is_empty() {
+        return Err(GatewayError::InvalidArgs("empty memberAgentIds".into()));
+    }
+    let mut ids = Vec::with_capacity(arr.len());
+    for v in arr {
+        let id = v
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("invalid memberAgentIds entry".into()))?
+            .to_string();
+        ids.push(id);
+    }
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err(GatewayError::InvalidArgs("empty memberAgentIds".into()));
+    }
+    Ok(ids)
+}
+
+/// Members must exist and must not themselves be groups (no nesting).
+pub fn validate_group_members(
+    agents: &HashMap<String, AgentRecord>,
+    member_ids: &[String],
+) -> Result<(), GatewayError> {
+    for id in member_ids {
+        let Some(a) = agents.get(id) else {
+            return Err(GatewayError::InvalidArgs(format!(
+                "unknown member agent id: {id}"
+            )));
+        };
+        if a.is_group {
+            return Err(GatewayError::InvalidArgs(format!(
+                "group nesting forbidden: {id} is a group"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Shared SandAgentSummary-shaped JSON used by InMemory / Box / CLI / OpenAI.
+pub fn agent_summary_value(a: &AgentRecord) -> Value {
+    json!({
+        "id": a.id,
+        "name": a.name,
+        "description": a.description,
+        "isRunning": a.is_running,
+        "isActive": true,
+        "isGroup": a.is_group,
+        "memberIds": a.member_ids,
+        "hasUnread": false,
+        "isComposingMessage": false,
+        "createdAt": a.created_at,
+        "avatarDataUrl": Value::Null,
+        "awaitingUserResponse": Value::Null,
+        "lastEntry": Value::Null,
+        "lastMessageId": Value::Null,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,6 +539,8 @@ impl InMemoryGateway {
                 description: "P3 stub agent".to_string(),
                 is_running: false,
                 created_at: 1_700_000_000_000.0,
+                is_group: false,
+                member_ids: Vec::new(),
             },
         );
         let mut transcripts = HashMap::new();
@@ -568,21 +646,7 @@ impl InMemoryGateway {
     }
 
     fn agent_summary(a: &AgentRecord) -> Value {
-        json!({
-            "id": a.id,
-            "name": a.name,
-            "description": a.description,
-            "isRunning": a.is_running,
-            "isActive": true,
-            "isGroup": false,
-            "hasUnread": false,
-            "isComposingMessage": false,
-            "createdAt": a.created_at,
-            "avatarDataUrl": Value::Null,
-            "awaitingUserResponse": Value::Null,
-            "lastEntry": Value::Null,
-            "lastMessageId": Value::Null,
-        })
+        agent_summary_value(a)
     }
 
     async fn list_agents(&self) -> Result<Value, GatewayError> {
@@ -624,6 +688,8 @@ impl InMemoryGateway {
             description,
             is_running: false,
             created_at,
+            is_group: false,
+            member_ids: Vec::new(),
         };
         let seed = TranscriptEntry {
             id: format!("msg_seed_{id}"),
@@ -639,6 +705,78 @@ impl InMemoryGateway {
             "transcript": [seed],
             "agentId": id,
         }))
+    }
+
+    async fn create_group(&self, args: &Value) -> Result<Value, GatewayError> {
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing name".into()))?
+            .to_string();
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let member_ids = parse_member_agent_ids(args)?;
+        let mut guard = self.shared.inner.write().await;
+        validate_group_members(&guard.agents, &member_ids)?;
+        let n = guard.next_agent_n;
+        guard.next_agent_n += 1;
+        let id = format!("agt_{n}");
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0);
+        let record = AgentRecord {
+            id: id.clone(),
+            name: name.clone(),
+            description,
+            is_running: false,
+            created_at,
+            is_group: true,
+            member_ids: member_ids.clone(),
+        };
+        let seed = TranscriptEntry {
+            id: format!("msg_seed_{id}"),
+            role: "assistant".to_string(),
+            text: format!("group {name} ready"),
+            seq: 1,
+        };
+        guard.agents.insert(id.clone(), record.clone());
+        guard.transcripts.insert(id.clone(), vec![seed.clone()]);
+        guard.next_entry_seq.insert(id.clone(), 2);
+        Ok(json!({
+            "agent": Self::agent_summary(&record),
+            "transcript": [seed],
+            "agentId": id,
+        }))
+    }
+
+    async fn set_group_members(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = args
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| GatewayError::InvalidArgs("missing id".into()))?
+            .to_string();
+        let member_ids = parse_member_agent_ids(args)?;
+        let mut guard = self.shared.inner.write().await;
+        let Some(existing) = guard.agents.get(&id) else {
+            return Err(GatewayError::InvalidArgs(format!("unknown group id: {id}")));
+        };
+        if !existing.is_group {
+            return Err(GatewayError::InvalidArgs(format!(
+                "not a group: {id}"
+            )));
+        }
+        validate_group_members(&guard.agents, &member_ids)?;
+        let a = guard.agents.get_mut(&id).expect("checked");
+        a.member_ids = member_ids;
+        Ok(Self::agent_summary(a))
     }
 
     async fn mark_running(&self, agent_id: &str) -> Result<(), GatewayError> {
@@ -1004,6 +1142,8 @@ impl InMemoryGateway {
         match name {
             "listAgents" => self.list_agents().await,
             "createAgent" => self.create_agent(&args).await,
+            "createGroup" => self.create_group(&args).await,
+            "setGroupMembers" => self.set_group_members(&args).await,
             "sendPrompt" => self.send_prompt(agent_id, &args).await,
             "interruptAgentRun" => self.interrupt_agent_run(agent_id, &args).await,
             "getAgentTranscriptTail" => self.get_transcript_tail(agent_id, &args).await,
@@ -1742,6 +1882,180 @@ mod tests {
         let gw = InMemoryGateway::new();
         let err = gw
             .invoke("agt_1", "deleteAgents", json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::UnknownMethod(_)));
+    }
+
+    #[tokio::test]
+    async fn create_group_list_set_members_roundtrip() {
+        let gw = InMemoryGateway::new();
+        // Need a second non-group member besides seed agt_1
+        let created = gw
+            .invoke("agt_1", "createAgent", json!({ "name": "Scout" }))
+            .await
+            .unwrap();
+        let scout = created["agentId"].as_str().unwrap().to_string();
+
+        let group = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({
+                    "name": "Crew",
+                    "memberAgentIds": ["agt_1", scout],
+                    "description": "g1",
+                }),
+            )
+            .await
+            .unwrap();
+        let gid = group["agentId"].as_str().unwrap().to_string();
+        assert_eq!(group["agent"]["isGroup"], true);
+        assert_eq!(group["agent"]["name"], "Crew");
+        let members = group["agent"]["memberIds"].as_array().unwrap();
+        let mut got: Vec<_> = members
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        got.sort();
+        let mut expect = vec!["agt_1".to_string(), scout.clone()];
+        expect.sort();
+        assert_eq!(got, expect);
+
+        let agents = gw.invoke("agt_1", "listAgents", json!({})).await.unwrap();
+        let g = agents
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == gid)
+            .expect("group in list");
+        assert_eq!(g["isGroup"], true);
+        assert_eq!(g["memberIds"].as_array().unwrap().len(), 2);
+
+        // Create a third agent and set members to only that one
+        let third = gw
+            .invoke("agt_1", "createAgent", json!({ "name": "Third" }))
+            .await
+            .unwrap();
+        let tid = third["agentId"].as_str().unwrap().to_string();
+        let updated = gw
+            .invoke(
+                "agt_1",
+                "setGroupMembers",
+                json!({ "id": gid, "memberAgentIds": [tid] }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["isGroup"], true);
+        assert_eq!(updated["memberIds"], json!([tid]));
+
+        let agents2 = gw.invoke("agt_1", "listAgents", json!({})).await.unwrap();
+        let g2 = agents2
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == gid)
+            .unwrap();
+        assert_eq!(g2["memberIds"], json!([tid]));
+
+        // Group chat path: sendPrompt / transcript still work on group id
+        gw.invoke(
+            &gid,
+            "sendPrompt",
+            json!({ "agentId": gid, "prompt": "hi group", "immediate": true }),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let tail = gw
+            .invoke(
+                &gid,
+                "getAgentTranscriptTail",
+                json!({ "id": gid, "limit": 10 }),
+            )
+            .await
+            .unwrap();
+        assert!(tail["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["text"] == "hi group"));
+    }
+
+    #[tokio::test]
+    async fn create_group_rejects_invalid() {
+        let gw = InMemoryGateway::new();
+        // empty name
+        let err = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({ "name": "  ", "memberAgentIds": ["agt_1"] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        // empty members
+        let err = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({ "name": "G", "memberAgentIds": [] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        // unknown member
+        let err = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({ "name": "G", "memberAgentIds": ["agt_missing"] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        // nest group as member
+        let group = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({ "name": "Outer", "memberAgentIds": ["agt_1"] }),
+            )
+            .await
+            .unwrap();
+        let gid = group["agentId"].as_str().unwrap();
+        let err = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({ "name": "Nest", "memberAgentIds": [gid] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        // unknown group id for setGroupMembers
+        let err = gw
+            .invoke(
+                "agt_1",
+                "setGroupMembers",
+                json!({ "id": "agt_nope", "memberAgentIds": ["agt_1"] }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        // channels still closed-set UnknownMethod
+        let err = gw
+            .invoke(
+                "agt_1",
+                "connectChannel",
+                json!({ "id": "agt_1", "platform": "slack", "token": "x" }),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, GatewayError::UnknownMethod(_)));
