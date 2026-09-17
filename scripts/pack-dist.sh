@@ -59,6 +59,15 @@ cp -f "$TEMPLATE/README-INSTALL.md" "$DIST/README-INSTALL.md"
 cp -f "$TEMPLATE/scripts/start-cli-stack.sh" "$DIST/scripts/start-cli-stack.sh"
 cp -f "$TEMPLATE/scripts/start-cli-stack.ps1" "$DIST/scripts/start-cli-stack.ps1"
 chmod +x "$DIST/scripts/start-cli-stack.sh"
+# S1 one-click recipe (calls start-cli-stack; not atlas-desktop-stack)
+for recipe in start-atlas.sh start-atlas.ps1 start-atlas.cmd; do
+  if [[ -f "$TEMPLATE/scripts/$recipe" ]]; then
+    cp -f "$TEMPLATE/scripts/$recipe" "$DIST/scripts/$recipe"
+  fi
+done
+if [[ -f "$DIST/scripts/start-atlas.sh" ]]; then
+  chmod +x "$DIST/scripts/start-atlas.sh"
+fi
 # T1 entry helpers (also kept under scripts/ for repo-side install-local)
 for helper in install-desktop-entry.sh install-shortcuts.ps1; do
   if [[ -f "$ROOT/scripts/$helper" ]]; then
@@ -107,4 +116,5 @@ find "$DIST" -maxdepth 3 \( -type f -o -type d \) | sort
 echo
 echo "Next: ./scripts/archive-dist.sh   # portable tar.gz/zip from dist/"
 echo "      ./scripts/install-local.sh  # copy + .desktop entries"
+echo "      OR run dist/scripts/start-atlas.sh [--skip-pc]  # S1 one-click"
 echo "      OR run dist/scripts/start-cli-stack.sh from this tree"

@@ -47,6 +47,13 @@ foreach ($name in $packages) {
 Copy-Item -LiteralPath (Join-Path $Template 'README-INSTALL.md') -Destination (Join-Path $Dist 'README-INSTALL.md') -Force
 Copy-Item -LiteralPath (Join-Path $Template 'scripts\start-cli-stack.sh') -Destination (Join-Path $Dist 'scripts') -Force
 Copy-Item -LiteralPath (Join-Path $Template 'scripts\start-cli-stack.ps1') -Destination (Join-Path $Dist 'scripts') -Force
+# S1 one-click recipe (calls start-cli-stack; not atlas-desktop-stack)
+foreach ($recipe in @('start-atlas.sh', 'start-atlas.ps1', 'start-atlas.cmd')) {
+  $src = Join-Path $Template "scripts\$recipe"
+  if (Test-Path -LiteralPath $src) {
+    Copy-Item -LiteralPath $src -Destination (Join-Path $Dist 'scripts') -Force
+  }
+}
 # T1 entry helpers
 foreach ($helper in @('install-desktop-entry.sh', 'install-shortcuts.ps1')) {
   $fromRepo = Join-Path $Root "scripts\$helper"
@@ -92,5 +99,6 @@ Get-ChildItem -LiteralPath $Dist -Recurse -File | ForEach-Object { $_.FullName.S
 Write-Host ''
 Write-Host 'Next: .\scripts\archive-dist.ps1   # portable zip from dist\'
 Write-Host '      .\scripts\install-local.ps1  # copy + Start Menu shortcuts'
+Write-Host '      OR .\dist\scripts\start-atlas.ps1 -SkipPc  # S1 one-click'
 Write-Host '      OR .\dist\scripts\start-cli-stack.ps1'
 
