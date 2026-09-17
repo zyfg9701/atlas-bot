@@ -46,6 +46,8 @@ use crate::{
     BOX_TEXT_FILE_MAX_BYTES, DEFAULT_AGENT_ID, DEFAULT_AGENT_NAME, DEFAULT_ATTACH_TTL_SECS,
     DEFAULT_VNC_STUB_BASE, ENV_ATTACH_TTL_SECS, ENV_VNC_MODE, ENV_VNC_UPSTREAM,
     UPLOAD_ARGS_JSON_MAX_BYTES,
+    ChannelStore, ChannelTokenEntry, parse_channel_id, parse_channel_platform,
+    parse_channel_token, require_stub_platform, sand_channels_view,
 };
 
 /// Workspace root for agent subdirs.
@@ -164,6 +166,8 @@ struct Inner {
     next_entry_seq: HashMap<String, u64>,
     next_agent_n: u64,
     uploads: HashMap<String, BoxUploadRecord>,
+    /// C1: agent_id → platform → token entry (memory only).
+    channel_connections: ChannelStore,
 }
 
 struct PendingTurn {
@@ -407,6 +411,7 @@ impl BoxSidecarGateway {
                     next_entry_seq,
                     next_agent_n: 2,
                     uploads: HashMap::new(),
+                    channel_connections: ChannelStore::new(),
                 }),
                 invokes: AtomicU64::new(0),
                 pending: RwLock::new(HashMap::new()),
@@ -743,7 +748,69 @@ impl BoxSidecarGateway {
         Ok(Self::agent_summary(a))
     }
 
-    async fn mark_running(&self, agent_id: &str) -> Result<(), GatewayError> {
+    
+    async fn get_agent_channels(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let guard = self.shared.inner.read().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        Ok(sand_channels_view(&guard.channel_connections, &id))
+    }
+
+    async fn connect_channel(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let platform = parse_channel_platform(args)?;
+        require_stub_platform(&platform)?;
+        let token = parse_channel_token(args)?;
+        let mut guard = self.shared.inner.write().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        guard
+            .channel_connections
+            .entry(id.clone())
+            .or_default()
+            .insert(platform, ChannelTokenEntry::stub_connected(token));
+        Ok(sand_channels_view(&guard.channel_connections, &id))
+    }
+
+    async fn disconnect_channel(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let platform = parse_channel_platform(args)?;
+        require_stub_platform(&platform)?;
+        let mut guard = self.shared.inner.write().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        if let Some(by_plat) = guard.channel_connections.get_mut(&id) {
+            by_plat.remove(&platform);
+            if by_plat.is_empty() {
+                guard.channel_connections.remove(&id);
+            }
+        }
+        Ok(sand_channels_view(&guard.channel_connections, &id))
+    }
+
+    async fn refresh_channel(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let platform = parse_channel_platform(args)?;
+        require_stub_platform(&platform)?;
+        let mut guard = self.shared.inner.write().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        if let Some(entry) = guard
+            .channel_connections
+            .get_mut(&id)
+            .and_then(|m| m.get_mut(&platform))
+        {
+            entry.refresh_stub();
+        }
+        Ok(sand_channels_view(&guard.channel_connections, &id))
+    }
+
+async fn mark_running(&self, agent_id: &str) -> Result<(), GatewayError> {
         let mut guard = self.shared.inner.write().await;
         let Some(a) = guard.agents.get_mut(agent_id) else {
             return Err(GatewayError::AgentNotFound(agent_id.to_string()));
@@ -1615,6 +1682,10 @@ impl BoxSidecarGateway {
             "createAgent" => self.create_agent(&args).await,
             "createGroup" => self.create_group(&args).await,
             "setGroupMembers" => self.set_group_members(&args).await,
+            "getAgentChannels" => self.get_agent_channels(&args).await,
+            "connectChannel" => self.connect_channel(&args).await,
+            "disconnectChannel" => self.disconnect_channel(&args).await,
+            "refreshChannel" => self.refresh_channel(&args).await,
             "sendPrompt" => self.send_prompt(agent_id, &args).await,
             "interruptAgentRun" => self.interrupt_agent_run(agent_id, &args).await,
             "getAgentTranscriptTail" => self.get_transcript_tail(agent_id, &args).await,
@@ -1913,15 +1984,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated["memberIds"], json!([sid]));
-        let err = gw
+        let secret = "box-c1-secret-token";
+        let view = gw
             .invoke(
                 "agt_1",
                 "connectChannel",
-                json!({ "id": gid, "platform": "slack", "token": "x" }),
+                json!({ "id": gid, "platform": "slack", "token": secret }),
             )
             .await
-            .unwrap_err();
-        assert!(matches!(err, GatewayError::UnknownMethod(_)));
+            .unwrap();
+        assert_eq!(view["connections"].as_array().unwrap().len(), 1);
+        assert_eq!(view["connections"][0]["status"], "connected");
+        assert!(view["connections"][0].get("token").is_none());
+        let dump = serde_json::to_string(&view).unwrap();
+        assert!(!dump.contains(secret));
+        let cleared = gw
+            .invoke(
+                "agt_1",
+                "disconnectChannel",
+                json!({ "id": gid, "platform": "slack" }),
+            )
+            .await
+            .unwrap();
+        assert!(cleared["connections"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

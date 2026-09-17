@@ -249,3 +249,20 @@ ul.agents li.selected { border-color: var(--accent); background: #1c2a40; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* C1 channels sidebar */
+.channels-panel {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.channel-manifest, .channel-connections, .channel-status {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.channels-panel input[type="password"] {
+  width: 100%;
+}

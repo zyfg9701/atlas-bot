@@ -6,10 +6,15 @@
 //! - [`BoxSidecarGateway`] — R1/R2/RR1 Box Sidecar (tools + optional LLM + VNC/attach)
 //!
 //! Hot commands: `listAgents`, `createAgent`, `createGroup`, `setGroupMembers`,
+//! `connectChannel`, `disconnectChannel`, `refreshChannel`, `getAgentChannels`,
 //! `sendPrompt`, `getAgentTranscriptTail`, `interruptAgentRun`,
-//! `uploadAttachment`, `attachUpload`. Other catalog names (incl. channel
-//! family) return [`GatewayError::UnknownMethod`] which the hub maps to
+//! `uploadAttachment`, `attachUpload`. Other catalog names return
+//! [`GatewayError::UnknownMethod`] which the hub maps to
 //! `command_rejected` / `gateway/unknown-method`.
+//!
+//! C1 channels: single Slack stub (`platform=slack`); token in process memory
+//! only; reply is always `SandChannelsView` (never echoes token). CLI/OpenAI
+//! stay UnknownMethod for the channel family.
 //!
 //! VNC is **not** a command name: Hub calls [`Gateway::vnc_descriptor`] for
 //! `bot.vncDescriptor`. Modes: `ATLAS_VNC_MODE=stub|proxy` (default stub);
@@ -22,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod box_sidecar;
+pub mod channels;
 pub mod cli_gateway;
 pub mod openai_gateway;
 pub mod tool_approval;
@@ -34,6 +40,11 @@ pub use box_sidecar::{
     ENV_BOX_SESSION_PERSIST, ENV_BOX_TURN_DELAY_MS, ENV_BOX_WORKSPACE, ENV_HUB_EVENT_TOKEN,
     ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS, TOOL_TRIGGER_LIST_DIR, TOOL_TRIGGER_READ_FILE,
     TOOL_TRIGGER_WRITE_FILE,
+};
+pub use channels::{
+    json_contains_substr, parse_channel_id, parse_channel_platform, parse_channel_token,
+    require_stub_platform, sand_channels_view, slack_stub_manifest, ChannelStore,
+    ChannelTokenEntry, C1_STUB_PLATFORM, C1_STUB_STATUS,
 };
 pub use tool_approval::{
     classify_cli_tool, ApprovalDecision, CliToolGateClass, ToolApprovalMode, APPROVAL_PENDING_PREFIX,
@@ -425,6 +436,8 @@ struct Inner {
     next_agent_n: u64,
     /// uploadId -> stored stub attachment
     uploads: HashMap<String, UploadRecord>,
+    /// C1: (agent_id → platform → token entry); process memory only, never disk.
+    channel_connections: ChannelStore,
 }
 
 struct PendingTurn {
@@ -582,6 +595,7 @@ impl InMemoryGateway {
                     next_entry_seq,
                     next_agent_n: 2,
                     uploads,
+                    channel_connections: ChannelStore::new(),
                 }),
                 invokes: AtomicU64::new(0),
                 pending: RwLock::new(HashMap::new()),
@@ -777,6 +791,72 @@ impl InMemoryGateway {
         let a = guard.agents.get_mut(&id).expect("checked");
         a.member_ids = member_ids;
         Ok(Self::agent_summary(a))
+    }
+
+
+    async fn get_agent_channels(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let guard = self.shared.inner.read().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        Ok(sand_channels_view(&guard.channel_connections, &id))
+    }
+
+    async fn connect_channel(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let platform = parse_channel_platform(args)?;
+        require_stub_platform(&platform)?;
+        let token = parse_channel_token(args)?;
+        let mut guard = self.shared.inner.write().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        guard
+            .channel_connections
+            .entry(id.clone())
+            .or_default()
+            .insert(platform, ChannelTokenEntry::stub_connected(token));
+        let view = sand_channels_view(&guard.channel_connections, &id);
+        // Defense-in-depth: reply must never contain the raw token.
+        // (We intentionally do not pass `token` into error paths above.)
+        Ok(view)
+    }
+
+    async fn disconnect_channel(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let platform = parse_channel_platform(args)?;
+        require_stub_platform(&platform)?;
+        let mut guard = self.shared.inner.write().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        if let Some(by_plat) = guard.channel_connections.get_mut(&id) {
+            by_plat.remove(&platform);
+            if by_plat.is_empty() {
+                guard.channel_connections.remove(&id);
+            }
+        }
+        Ok(sand_channels_view(&guard.channel_connections, &id))
+    }
+
+    async fn refresh_channel(&self, args: &Value) -> Result<Value, GatewayError> {
+        let id = parse_channel_id(args)?;
+        let platform = parse_channel_platform(args)?;
+        require_stub_platform(&platform)?;
+        let mut guard = self.shared.inner.write().await;
+        if !guard.agents.contains_key(&id) {
+            return Err(GatewayError::InvalidArgs(format!("unknown agent id: {id}")));
+        }
+        // Stub refresh: re-normalize in-memory status only. Never probes egress.
+        if let Some(entry) = guard
+            .channel_connections
+            .get_mut(&id)
+            .and_then(|m| m.get_mut(&platform))
+        {
+            entry.refresh_stub();
+        }
+        Ok(sand_channels_view(&guard.channel_connections, &id))
     }
 
     async fn mark_running(&self, agent_id: &str) -> Result<(), GatewayError> {
@@ -1144,6 +1224,10 @@ impl InMemoryGateway {
             "createAgent" => self.create_agent(&args).await,
             "createGroup" => self.create_group(&args).await,
             "setGroupMembers" => self.set_group_members(&args).await,
+            "getAgentChannels" => self.get_agent_channels(&args).await,
+            "connectChannel" => self.connect_channel(&args).await,
+            "disconnectChannel" => self.disconnect_channel(&args).await,
+            "refreshChannel" => self.refresh_channel(&args).await,
             "sendPrompt" => self.send_prompt(agent_id, &args).await,
             "interruptAgentRun" => self.interrupt_agent_run(agent_id, &args).await,
             "getAgentTranscriptTail" => self.get_transcript_tail(agent_id, &args).await,
@@ -2049,16 +2133,132 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, GatewayError::InvalidArgs(_)));
 
-        // channels still closed-set UnknownMethod
+        // C1 channels implemented on InMemory — covered by channel_* tests below
+    }
+
+    #[tokio::test]
+    async fn channel_connect_get_disconnect_no_token_in_reply() {
+        let gw = InMemoryGateway::new();
+        let secret = "c1-secret-token-should-never-leak";
+
+        let empty = gw
+            .invoke("agt_1", "getAgentChannels", json!({ "id": "agt_1" }))
+            .await
+            .unwrap();
+        assert!(empty["connections"].as_array().unwrap().is_empty());
+        assert_eq!(empty["manifests"][0]["platform"], "slack");
+        assert!(!json_contains_substr(&empty, secret));
+
+        let connected = gw
+            .invoke(
+                "agt_1",
+                "connectChannel",
+                json!({ "id": "agt_1", "platform": "slack", "token": secret }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(connected["connections"].as_array().unwrap().len(), 1);
+        assert_eq!(connected["connections"][0]["platform"], "slack");
+        assert_eq!(connected["connections"][0]["status"], "connected");
+        assert!(connected["connections"][0].get("token").is_none());
+        assert!(!json_contains_substr(&connected, secret));
+
+        let again = gw
+            .invoke("agt_1", "getAgentChannels", json!({ "id": "agt_1" }))
+            .await
+            .unwrap();
+        assert_eq!(again["connections"].as_array().unwrap().len(), 1);
+        assert!(!json_contains_substr(&again, secret));
+
+        let refreshed = gw
+            .invoke(
+                "agt_1",
+                "refreshChannel",
+                json!({ "id": "agt_1", "platform": "slack" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed["connections"][0]["status"], "connected");
+        assert!(!json_contains_substr(&refreshed, secret));
+
+        let cleared = gw
+            .invoke(
+                "agt_1",
+                "disconnectChannel",
+                json!({ "id": "agt_1", "platform": "slack" }),
+            )
+            .await
+            .unwrap();
+        assert!(cleared["connections"].as_array().unwrap().is_empty());
+        assert!(!json_contains_substr(&cleared, secret));
+
+        let after = gw
+            .invoke("agt_1", "getAgentChannels", json!({ "id": "agt_1" }))
+            .await
+            .unwrap();
+        assert!(after["connections"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_rejects_illegal_args() {
+        let gw = InMemoryGateway::new();
+
         let err = gw
             .invoke(
                 "agt_1",
                 "connectChannel",
-                json!({ "id": "agt_1", "platform": "slack", "token": "x" }),
+                json!({ "id": "agt_1", "platform": "slack", "token": "  " }),
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, GatewayError::UnknownMethod(_)));
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        let err = gw
+            .invoke(
+                "agt_1",
+                "connectChannel",
+                json!({ "id": "agt_1", "platform": "teams", "token": "abc" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        let err = gw
+            .invoke(
+                "agt_1",
+                "connectChannel",
+                json!({ "id": "agt_missing", "platform": "slack", "token": "abc" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        let err = gw
+            .invoke("agt_1", "getAgentChannels", json!({ "id": "agt_missing" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GatewayError::InvalidArgs(_)));
+
+        // groups may host channels (default allow)
+        let group = gw
+            .invoke(
+                "agt_1",
+                "createGroup",
+                json!({ "name": "ChanGroup", "memberAgentIds": ["agt_1"] }),
+            )
+            .await
+            .unwrap();
+        let gid = group["agentId"].as_str().unwrap();
+        let view = gw
+            .invoke(
+                "agt_1",
+                "connectChannel",
+                json!({ "id": gid, "platform": "slack", "token": "group-tok" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(view["connections"].as_array().unwrap().len(), 1);
+        assert!(!json_contains_substr(&view, "group-tok"));
     }
 
     #[tokio::test]

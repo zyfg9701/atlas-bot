@@ -434,6 +434,39 @@ export class HubClient {
     return this.command(routingAgentId, "setGroupMembers", args);
   }
 
+  /** C1: getAgentChannels via existing bot.command (catalog name). */
+  getAgentChannels(routingAgentId: string, id: string): Promise<unknown> {
+    return this.command(routingAgentId, "getAgentChannels", { id });
+  }
+
+  /** C1: connectChannel — token only in args; never persist in localStorage. */
+  connectChannel(
+    routingAgentId: string,
+    id: string,
+    platform: string,
+    token: string,
+  ): Promise<unknown> {
+    return this.command(routingAgentId, "connectChannel", { id, platform, token });
+  }
+
+  /** C1: disconnectChannel clears gateway in-memory token for (id, platform). */
+  disconnectChannel(
+    routingAgentId: string,
+    id: string,
+    platform: string,
+  ): Promise<unknown> {
+    return this.command(routingAgentId, "disconnectChannel", { id, platform });
+  }
+
+  /** C1: refreshChannel — local stub re-normalize; no egress probe. */
+  refreshChannel(
+    routingAgentId: string,
+    id: string,
+    platform: string,
+  ): Promise<unknown> {
+    return this.command(routingAgentId, "refreshChannel", { id, platform });
+  }
+
   sendPrompt(agentId: string, prompt: string, opts?: { immediate?: boolean }): Promise<unknown> {
     const args: Record<string, unknown> = { agentId, prompt };
     if (opts?.immediate) args.immediate = true;

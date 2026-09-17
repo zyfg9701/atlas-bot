@@ -99,14 +99,15 @@ cd clients/pc && npm i && npm run tauri dev
 | Connect / hello / capabilities | 主屏顶栏；caps 在调试 |
 | Bearer / Login (OIDC PKCE) | 高级 + 顶栏 Login；生产靠 Tauri `connect_ws` |
 | Cold status/roster/offbox | 调试 |
-| list / create / **createGroup / setGroupMembers** / subscribe / send / interrupt / tail | 主屏自动 + 侧栏群组 + 调试细按钮 |
+| list / create / **createGroup / setGroupMembers** / **Channels 四命令** / subscribe / send / interrupt / tail | 主屏自动 + 侧栏群组 + **Channels stub** + 调试细按钮 |
 | Events / transcript | 主屏合并流；调试保留原面板 |
 | VNC / upload / attach | composer 图标 + 调试 |
 | Failure / Log | 错误条 + 调试 Log |
 
-**还不是：** 品牌视觉系统、**频道**（`connectChannel` 等，另票 C1）、上架包、强制移动建群 UI、群套群 / fan-out 编排、删群产品化、I2.2 移动取票、React/Vue 重写、GA2/YOLO/desktop 集群。
+**还不是：** 品牌视觉系统、**真连 Slack / 多平台频道**（C1-real / C1-multi 另票）、上架包、强制移动建群/频道 UI、群套群 / fan-out 编排、删群产品化、I2.2 移动取票、React/Vue 重写、GA2/YOLO/desktop 集群、token 钥匙串/加密落盘。
 
 **G1 已交付（PC）：** 侧栏 **Create group**（name + 多选已有非群 agent）→ 列表带 `[group]` 标记并可自动选中；选中群可见成员；**Change members** 改成员；对群 agentId 既有 Subscribe/Send/transcript 不回归。零新 `bot.*`（仅 catalog `createGroup` / `setGroupMembers` 经 `bot.command`）。Gateway：**InMemory + Box** 同形；**CLI / OpenAI** 本刀未跟（对该后端群命令仍 `UnknownMethod` 闭集拒绝，不装成功）。
+**C1 已交付（PC）：** 侧栏 **Channels (C1 · local stub)** — 单平台 `slack` manifest；password 粘贴 token → Connect / Disconnect / Refresh；文案标明本地 stub、未出网。零新 `bot.*`（仅 catalog 四命令经 `bot.command`）。Gateway：**InMemory + Box** 同形；**CLI / OpenAI** 未跟（闭集 `UnknownMethod`）。Token 仅进程内存，reply/日志不回显，Disconnect 清除；不写 localStorage/钥匙串。
 
 ---
 
@@ -117,6 +118,20 @@ cd clients/pc && npm i && npm run tauri dev
 3. 改成员：选中群 → 调整 Members 多选 → **Change members**；`group members:` 行与再 `listAgents` 一致。
 
 群上对话与单 agent 相同（单 transcript stub/echo；**非**多成员 fan-out）。手测见 [`docs/g1-group-handtest.md`](./g1-group-handtest.md)。
+
+---
+
+## 4.6 C1 Channels 三步（PC · 本地 Slack stub · 未出网）
+
+1. **Connect** → 选中任意 agent（含群；默认允许挂频道）。  
+2. 侧栏 **Channels (C1 · local stub)**：可见 `slack` manifest（文案含「local stub / no egress」）→ password 框粘贴 token → **Connect** → connections 显示 `connected`（**非**真连 Slack）。  
+3. **Disconnect** 清除 gateway 内存 token；**Refresh** 仅重读/规范化本地 status（不探外网）。
+
+**Token：** 只经 `connectChannel` args 进入；gateway **进程内存**；reply / listAgents / 日志不回显；Disconnect 清除；**不**写入 localStorage / 钥匙串。进程重启丢失。
+
+零新 `bot.*`（仅 catalog `connectChannel` / `disconnectChannel` / `refreshChannel` / `getAgentChannels` 经 `bot.command`）。Gateway：**InMemory + Box** 同形；**CLI / OpenAI** 本刀未跟（闭集 `UnknownMethod`）。
+
+手测见 [`docs/c1-channel-handtest.md`](./c1-channel-handtest.md)。**非 C1-real / 非 C1-multi / 非上架签名 / 非 GA2·YOLO·集群。**
 
 ---
 
@@ -148,6 +163,7 @@ cd clients/pc && npm i && npm run tauri dev
 
 - U1 手测：`docs/pc-ui-u1-checklist.md`  
 - G1 群组手测：[`docs/g1-group-handtest.md`](./g1-group-handtest.md)  
+- C1 频道手测：[`docs/c1-channel-handtest.md`](./c1-channel-handtest.md)  
 - **主路径：** [`docs/cli-primary-runbook.md`](./cli-primary-runbook.md)  
 - Windows 起栈：[`docs/windows-cli-stack-checklist.md`](./windows-cli-stack-checklist.md)  
 - 阶段 runbook：`docs/P*-runbook.md`、`docs/p1-desktop-runbook.md`、`docs/i2-login-runbook.md`、`docs/b1-event-ingest-runbook.md`  
