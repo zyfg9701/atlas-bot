@@ -14,7 +14,7 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::info;
 
 use crate::{
-    AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
+    agent_summary_value, AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
     DEFAULT_AGENT_NAME,
 };
 
@@ -75,6 +75,8 @@ impl OpenAiCompatGateway {
                 description: "P3.5 OpenAI-compat agent".to_string(),
                 is_running: false,
                 created_at: 1_700_000_000_000.0,
+                is_group: false,
+                member_ids: Vec::new(),
             },
         );
         let mut transcripts = HashMap::new();
@@ -113,21 +115,7 @@ impl OpenAiCompatGateway {
     }
 
     fn agent_summary(a: &AgentRecord) -> Value {
-        json!({
-            "id": a.id,
-            "name": a.name,
-            "description": a.description,
-            "isRunning": a.is_running,
-            "isActive": true,
-            "isGroup": false,
-            "hasUnread": false,
-            "isComposingMessage": false,
-            "createdAt": a.created_at,
-            "avatarDataUrl": Value::Null,
-            "awaitingUserResponse": Value::Null,
-            "lastEntry": Value::Null,
-            "lastMessageId": Value::Null,
-        })
+        agent_summary_value(a)
     }
 
     async fn list_agents(&self) -> Result<Value, GatewayError> {
@@ -169,6 +157,8 @@ impl OpenAiCompatGateway {
             description,
             is_running: false,
             created_at,
+            is_group: false,
+            member_ids: Vec::new(),
         };
         let seed = TranscriptEntry {
             id: format!("msg_seed_{id}"),

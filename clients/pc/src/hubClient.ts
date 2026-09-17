@@ -410,6 +410,30 @@ export class HubClient {
     return this.command(routingAgentId, "createAgent", args);
   }
 
+  /** G1: createGroup via existing bot.command (catalog name). */
+  createGroup(
+    routingAgentId: string,
+    name: string,
+    memberAgentIds: string[],
+    description = "",
+  ): Promise<unknown> {
+    const args: Record<string, unknown> = { name, memberAgentIds };
+    if (description) args.description = description;
+    return this.command(routingAgentId, "createGroup", args);
+  }
+
+  /** G1: setGroupMembers via existing bot.command (catalog name). No delete-group. */
+  setGroupMembers(
+    routingAgentId: string,
+    id: string,
+    memberAgentIds: string[],
+    requesterAgentId?: string,
+  ): Promise<unknown> {
+    const args: Record<string, unknown> = { id, memberAgentIds };
+    if (requesterAgentId) args.requesterAgentId = requesterAgentId;
+    return this.command(routingAgentId, "setGroupMembers", args);
+  }
+
   sendPrompt(agentId: string, prompt: string, opts?: { immediate?: boolean }): Promise<unknown> {
     const args: Record<string, unknown> = { agentId, prompt };
     if (opts?.immediate) args.immediate = true;

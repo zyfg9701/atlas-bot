@@ -39,7 +39,7 @@ use crate::tool_approval::{
 };
 use crate::{
     box_sidecar::{ENV_HUB_EVENT_TOKEN, ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS},
-    AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
+    agent_summary_value, AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
     DEFAULT_AGENT_NAME,
 };
 
@@ -267,6 +267,8 @@ impl CliAgentGateway {
                 description: "P3.5 CLI agent".to_string(),
                 is_running: false,
                 created_at: 1_700_000_000_000.0,
+                is_group: false,
+                member_ids: Vec::new(),
             },
         );
         let mut transcripts = HashMap::new();
@@ -401,21 +403,7 @@ impl CliAgentGateway {
     }
 
     fn agent_summary(a: &AgentRecord) -> Value {
-        json!({
-            "id": a.id,
-            "name": a.name,
-            "description": a.description,
-            "isRunning": a.is_running,
-            "isActive": true,
-            "isGroup": false,
-            "hasUnread": false,
-            "isComposingMessage": false,
-            "createdAt": a.created_at,
-            "avatarDataUrl": Value::Null,
-            "awaitingUserResponse": Value::Null,
-            "lastEntry": Value::Null,
-            "lastMessageId": Value::Null,
-        })
+        agent_summary_value(a)
     }
 
     async fn list_agents(&self) -> Result<Value, GatewayError> {
@@ -457,6 +445,8 @@ impl CliAgentGateway {
             description,
             is_running: false,
             created_at,
+            is_group: false,
+            member_ids: Vec::new(),
         };
         let seed = TranscriptEntry {
             id: format!("msg_seed_{id}"),
