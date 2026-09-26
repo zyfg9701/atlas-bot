@@ -36,7 +36,7 @@ if ([string]::IsNullOrWhiteSpace($Dest)) {
   $Dest = Join-Path $env:LOCALAPPDATA 'atlas-bot'
 }
 
-Write-Host "==> install-local → $Dest"
+Write-Host "==> install-local -> $Dest"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 
 # Robocopy is quote/space-safe; exclude runtime state dirs
@@ -91,7 +91,7 @@ if (-not $SkipShortcuts) {
     if ($Desktop) { $scArgs['Desktop'] = $true }
     & $sc @scArgs
   } else {
-    Write-Host '    (install-shortcuts.ps1 missing — skipped)' -ForegroundColor Yellow
+    Write-Host '    (install-shortcuts.ps1 missing - skipped)' -ForegroundColor Yellow
   }
 } else {
   Write-Host '==> skip shortcuts (-SkipShortcuts)'
@@ -102,14 +102,14 @@ Write-Host "Installed to: $Dest"
 Write-Host 'Next steps:'
 $startPs1 = Join-Path $Dest 'scripts\start-cli-stack.ps1'
 $pcExe = Join-Path $Dest 'pc\atlas-bot-pc.exe'
-Write-Host "  1. Start stack:  Start Menu → atlas-bot → atlas-bot Start CLI Stack"
+Write-Host "  1. Start stack:  Start Menu -> atlas-bot -> atlas-bot Start CLI Stack"
 Write-Host "     or: & '$startPs1'"
 Write-Host '     (requires agent on PATH, or $env:ATLAS_AGENT_CLI=... ; probe fail = non-zero)'
 Write-Host "     Optional streaming: & '$startPs1' -Stream"
-Write-Host "  2. Open PC:      Start Menu → atlas-bot → atlas-bot PC"
+Write-Host "  2. Open PC:      Start Menu -> atlas-bot -> atlas-bot PC"
 Write-Host "     or: & '$pcExe'"
-Write-Host '  3. Connect → ws://127.0.0.1:7700/ws → select agent → Send'
+Write-Host '  3. Connect -> ws://127.0.0.1:7700/ws -> select agent -> Send'
 Write-Host ''
-Write-Host 'Unsigned / SmartScreen yellow is OK (More info → Run anyway). Not a store package.'
+Write-Host 'Unsigned / SmartScreen yellow is OK (More info -> Run anyway). Not a store package.'
 Write-Host 'T2 MSI: scripts/build-msi.ps1 (WiX v4). Desktop shortcuts: re-run install-shortcuts.ps1 -Desktop'
 Write-Host "See: $(Join-Path $Dest 'README-INSTALL.md')"

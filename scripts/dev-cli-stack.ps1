@@ -5,7 +5,7 @@
 #   .\scripts\dev-cli-stack.ps1
 #   powershell -ExecutionPolicy Bypass -File .\scripts\dev-cli-stack.ps1
 #   $env:ATLAS_AGENT_CLI='.\tools\mock-cli\mock-atlas-agent-cli.cmd'; .\scripts\dev-cli-stack.ps1
-#   # WS1·B streaming one-liner (multi-process B1 mid-turn):
+#   # WS1.B streaming one-liner (multi-process B1 mid-turn):
 #   $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\dev-cli-stack.ps1 -Stream
 #   # Or: $env:ATLAS_CLI_STACK_STREAM='1'; ...\dev-cli-stack.ps1
 #
@@ -21,7 +21,7 @@
 #   ATLAS_HUB_EVENT_BIND     Hub ingest listen (Hub default 127.0.0.1:7701)
 #   MOCK_CLI_STREAM          mock NDJSON deltas; -Stream + mock .cmd sets 1 if unset
 #   MOCK_CLI_SLEEP_MS        mock sleep between delta and result (cmd timeout is second-granularity)
-#   ATLAS_CLI_STACK_STREAM   1/true/yes — same as -Stream (explicit env alternative)
+#   ATLAS_CLI_STACK_STREAM   1/true/yes - same as -Stream (explicit env alternative)
 #
 # Priority: explicit user env for STREAM / EVENT_URL / MOCK / TOKEN / INSECURE always wins
 # (-Stream only fills unset defaults). Without -Stream / STACK_STREAM: text stack (W1 unchanged).
@@ -63,7 +63,7 @@ $PID_DIR = Get-EnvOrDefault 'ATLAS_CLI_STACK_PID_DIR' (Join-Path $Root '.cli-sta
 $LOG_DIR = Get-EnvOrDefault 'ATLAS_CLI_STACK_LOG_DIR' (Join-Path $Root '.cli-stack-logs')
 
 function Resolve-AgentCli([string]$c) {
-  # Absolute/relative path (slash, backslash, .\ ..\ or drive letter) → existing file
+  # Absolute/relative path (slash, backslash, .\ ..\ or drive letter) -> existing file
   $looksLikePath = ($c -match '[\\/]') -or ($c -match '^[A-Za-z]:')
   if ($looksLikePath) {
     $candidates = @($c)
@@ -83,7 +83,7 @@ function Resolve-AgentCli([string]$c) {
     return $null
   }
 
-  # Bare name → Get-Command (resolves agent.exe / agent.cmd / agent.bat on PATH)
+  # Bare name -> Get-Command (resolves agent.exe / agent.cmd / agent.bat on PATH)
   $cmd = Get-Command -Name $c -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandType -ne 'Alias' } |
     Select-Object -First 1
@@ -114,7 +114,7 @@ This script will NOT silently fall back to the Hub InMemory stub.
 For CI / local without a real agent, override with the mock CLI:
   `$env:ATLAS_AGENT_CLI='$mockFull'; .\scripts\dev-cli-stack.ps1
 
-Streaming (WS1·B):
+Streaming (WS1.B):
   `$env:ATLAS_AGENT_CLI='$mockFull'; .\scripts\dev-cli-stack.ps1 -Stream
 
 See docs/cli-primary-runbook.md
@@ -128,7 +128,7 @@ $env:ATLAS_GATEWAY_HTTP_BIND = $GW_BIND
 $env:ATLAS_HUB_BIND = $HUB_BIND
 $env:ATLAS_GATEWAY_URL = "http://${GW_BIND}"
 
-# WS1·B: -Stream switch and/or ATLAS_CLI_STACK_STREAM=1
+# WS1.B: -Stream switch and/or ATLAS_CLI_STACK_STREAM=1
 $wantStream = $Stream.IsPresent -or (Test-EnvTruthy 'ATLAS_CLI_STACK_STREAM')
 if ($wantStream) {
   if (-not (Test-EnvSet 'ATLAS_AGENT_CLI_STREAM')) {
@@ -184,7 +184,7 @@ function Stop-StackChildren {
 }
 
 # Ctrl-C: let PowerShell stop the script; `finally` below always runs Stop-StackChildren.
-# (Do NOT CancelKeyPress — that would swallow Ctrl-C and leave children running.)
+# (Do NOT CancelKeyPress - that would swallow Ctrl-C and leave children running.)
 
 Write-Host '==> CLI primary stack'
 Write-Host "    ATLAS_AGENT_CLI=$env:ATLAS_AGENT_CLI"
@@ -192,7 +192,7 @@ Write-Host "    ATLAS_GATEWAY_BACKEND=$env:ATLAS_GATEWAY_BACKEND"
 Write-Host "    gateway bind: $GW_BIND"
 Write-Host "    Hub WS:       ws://${HUB_BIND}/ws"
 Write-Host "    GATEWAY_URL:  $env:ATLAS_GATEWAY_URL"
-# Streaming / B1 / mock (always print — unset shown as empty)
+# Streaming / B1 / mock (always print - unset shown as empty)
 $streamDisp = if (Test-EnvSet 'ATLAS_AGENT_CLI_STREAM') { $env:ATLAS_AGENT_CLI_STREAM } else { '(unset=text)' }
 Write-Host "    ATLAS_AGENT_CLI_STREAM=$streamDisp"
 $eventUrlDisp = if (Test-EnvSet 'ATLAS_HUB_EVENT_URL') { $env:ATLAS_HUB_EVENT_URL } else { '(unset)' }
@@ -208,7 +208,7 @@ Write-Host "    MOCK_CLI_STREAM=$mockStreamDisp"
 $mockSleepDisp = if (Test-EnvSet 'MOCK_CLI_SLEEP_MS') { $env:MOCK_CLI_SLEEP_MS } else { '(unset)' }
 Write-Host "    MOCK_CLI_SLEEP_MS=$mockSleepDisp"
 if ($wantStream) {
-  Write-Host '    mode: Stream (-Stream / ATLAS_CLI_STACK_STREAM) — multi-process B1 only (no B2 dual)'
+  Write-Host '    mode: Stream (-Stream / ATLAS_CLI_STACK_STREAM) - multi-process B1 only (no B2 dual)'
 } else {
   Write-Host '    mode: text (pass -Stream or ATLAS_CLI_STACK_STREAM=1 for streaming)'
 }
@@ -316,7 +316,7 @@ function Wait-Healthz {
 }
 
 try {
-  Write-Host "==> starting atlas-bot-gateway (backend=$BACKEND) …"
+  Write-Host "==> starting atlas-bot-gateway (backend=$BACKEND) ..."
   if (Test-Path -LiteralPath $GW_LOG) { Remove-Item -LiteralPath $GW_LOG -Force -ErrorAction SilentlyContinue }
   $script:GwProcess = Start-CargoPackage -Package 'atlas-bot-gateway' -LogPath $GW_LOG
   Set-Content -LiteralPath $GW_PID_FILE -Value $script:GwProcess.Id -Encoding ascii
@@ -328,9 +328,9 @@ try {
     Write-Host "    healthz: $($hz.Content)"
   } catch { }
 
-  Write-Host "==> starting atlas-bot-hub (ATLAS_GATEWAY_URL=$env:ATLAS_GATEWAY_URL) …"
+  Write-Host "==> starting atlas-bot-hub (ATLAS_GATEWAY_URL=$env:ATLAS_GATEWAY_URL) ..."
   if (Test-Path -LiteralPath $HUB_LOG) { Remove-Item -LiteralPath $HUB_LOG -Force -ErrorAction SilentlyContinue }
-  # Disable embedded gateway HTTP on Hub (remote gateway owns :8787) — same as sh
+  # Disable embedded gateway HTTP on Hub (remote gateway owns :8787) - same as sh
   $script:HubProcess = Start-CargoPackage -Package 'atlas-bot-hub' -LogPath $HUB_LOG -ExtraEnv @{
     'ATLAS_GATEWAY_HTTP_BIND' = 'off'
   }
@@ -342,14 +342,14 @@ try {
   Write-Host 'Stack ready.'
   Write-Host "  Invoke-WebRequest http://${GW_BIND}/healthz   # or: curl.exe -s http://${GW_BIND}/healthz"
   Write-Host "  Invoke-WebRequest http://${GW_BIND}/stats"
-  Write-Host "  PC: Connect → ws://${HUB_BIND}/ws → select agent → Send"
+  Write-Host "  PC: Connect -> ws://${HUB_BIND}/ws -> select agent -> Send"
   if ($wantStream -or (Test-EnvSet 'ATLAS_HUB_EVENT_URL')) {
-    Write-Host '  Streaming: PC Events ≥1× hub:assistant_delta → hub:turn_finished (B1 ingest; no B2 dual)'
+    Write-Host '  Streaming: PC Events >=1x hub:assistant_delta -> hub:turn_finished (B1 ingest; no B2 dual)'
   }
   Write-Host "  Logs: $GW_LOG  $HUB_LOG"
   Write-Host "  Stop: Ctrl-C (cleanup kills both) or Stop-Process -Id (Get-Content '$GW_PID_FILE'), (Get-Content '$HUB_PID_FILE')"
   Write-Host ''
-  Write-Host 'Foreground hold (Ctrl-C to stop)…'
+  Write-Host 'Foreground hold (Ctrl-C to stop)...'
 
   while ($true) {
     $gwAlive = Test-PidAlive -Proc $script:GwProcess -PidFile $GW_PID_FILE

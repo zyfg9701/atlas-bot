@@ -39,7 +39,7 @@ function Resolve-InstallRoot {
   throw "Cannot resolve install root. Pass -InstallRoot or set ATLAS_BOT_HOME."
 }
 
-# Re-bind MyInvocation for nested function — compute script dir at top level
+# Re-bind MyInvocation for nested function - compute script dir at top level
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
   $envHome = [Environment]::GetEnvironmentVariable('ATLAS_BOT_HOME')
@@ -114,7 +114,7 @@ function New-AtlasShortcut {
 $Programs = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\atlas-bot'
 New-Item -ItemType Directory -Force -Path $Programs | Out-Null
 
-# PC shortcut → exe directly; WorkingDirectory = install root
+# PC shortcut -> exe directly; WorkingDirectory = install root
 New-AtlasShortcut `
   -LnkPath (Join-Path $Programs 'atlas-bot PC.lnk') `
   -TargetPath $PcExe `
@@ -122,7 +122,7 @@ New-AtlasShortcut `
   -Description 'atlas-bot PC shell (unsigned)' `
   -IconLocation $(if (Test-Path -LiteralPath $PcExe) { "$PcExe,0" } else { '' })
 
-# Start CLI Stack → powershell -NoProfile -ExecutionPolicy Bypass -File "<path>"
+# Start CLI Stack -> powershell -NoProfile -ExecutionPolicy Bypass -File "<path>"
 # Quote File path for spaces
 $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (-not (Test-Path -LiteralPath $psExe)) {
@@ -135,7 +135,7 @@ New-AtlasShortcut `
   -TargetPath $psExe `
   -Arguments $startArgs `
   -WorkingDirectory $InstallRoot `
-  -Description 'Start atlas-bot Hub+gateway (cli backend; binaries only — no cargo run)'
+  -Description 'Start atlas-bot Hub+gateway (cli backend; binaries only - no cargo run)'
 
 # S1 one-click: prefer .cmd (ExecutionPolicy Bypass) else powershell -File start-atlas.ps1
 if (Test-Path -LiteralPath $AtlasCmd) {
@@ -191,5 +191,5 @@ if ($Desktop) {
 Write-Host ''
 Write-Host "Install root: $InstallRoot"
 Write-Host "Start Menu:   $Programs"
-Write-Host 'Next: click "atlas-bot Start (stack+PC)" (S1), or Start CLI Stack then PC → Connect → Send'
-Write-Host 'Unsigned / SmartScreen yellow is OK. Not a store package. For MSI see scripts/build-msi.ps1 (T2·W).'
+Write-Host 'Next: click "atlas-bot Start (stack+PC)" (S1), or Start CLI Stack then PC -> Connect -> Send'
+Write-Host 'Unsigned / SmartScreen yellow is OK. Not a store package. For MSI see scripts/build-msi.ps1 (T2.W).'

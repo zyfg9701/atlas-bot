@@ -1,5 +1,5 @@
-# S1 one-click stack recipe: probe agent → call existing start-cli-stack.ps1 →
-# healthz (backend=cli) → optional PC → print Connect next steps.
+# S1 one-click stack recipe: probe agent -> call existing start-cli-stack.ps1 ->
+# healthz (backend=cli) -> optional PC -> print Connect next steps.
 # Does NOT rewrite start-cli-stack; does NOT cargo run; not atlas-desktop-stack.
 #
 # Usage:
@@ -9,7 +9,7 @@
 #   $env:ATLAS_AGENT_CLI='C:\path\to\agent.exe'; .\scripts\start-atlas.ps1
 # Double-click: start-atlas.cmd (ExecutionPolicy Bypass)
 #
-# See docs/packaging-skeleton.md §S1 and dist\README-INSTALL.md
+# See docs/packaging-skeleton.md section S1 and dist\README-INSTALL.md
 
 param(
   [switch]$SkipPc,
@@ -45,13 +45,13 @@ Usage: start-atlas.ps1 [-SkipPc] [-Help]
 
 S1 one-click recipe (install/unpack root):
   1. Probe ATLAS_AGENT_CLI or PATH "agent"
-  2. Call existing scripts\start-cli-stack.ps1 (binaries only — no cargo run)
+  2. Call existing scripts\start-cli-stack.ps1 (binaries only - no cargo run)
   3. Wait for gateway + Hub healthz with backend=cli
   4. Launch pc\atlas-bot-pc.exe (unless -SkipPc / ATLAS_SKIP_PC)
-  5. Print Connect next steps (ws://…/ws)
+  5. Print Connect next steps (ws://.../ws)
 
 Not this knife: signing, updater, store, C1-real, GA2/YOLO,
-  atlas-desktop-stack (VNC/D1). Still need a local agent; one-click ≠ bundling it.
+  atlas-desktop-stack (VNC/D1). Still need a local agent; one-click != bundling it.
 '@
   exit 0
 }
@@ -200,7 +200,7 @@ $alreadyUp = (Test-HttpOk "http://${GW_BIND}/healthz") -and (Test-HttpOk "http:/
 if ($alreadyUp) {
   Write-Host '==> stack already healthy (gateway+Hub, backend=cli); reusing'
 } else {
-  Write-Host '==> starting stack via existing start-cli-stack.ps1 (separate process)…'
+  Write-Host '==> starting stack via existing start-cli-stack.ps1 (separate process)...'
   if (-not (Test-Path -LiteralPath $LOG_DIR)) {
     New-Item -ItemType Directory -Force -Path $LOG_DIR | Out-Null
   }
@@ -293,7 +293,7 @@ Write-Host 'Ready (S1 one-click).'
 Write-Host "  Connect:  ws://${HUB_BIND}/ws"
 Write-Host "  Gateway:  http://${GW_BIND}/healthz   (expect backend=cli)"
 Write-Host "  Hub:      http://${HUB_BIND}/healthz"
-Write-Host '  Next:     PC → Connect → select agent → Send'
+Write-Host '  Next:     PC -> Connect -> select agent -> Send'
 Write-Host "  Logs:     $LOG_DIR\gateway.log  $LOG_DIR\hub.log"
 if ($null -ne $stackProc -and -not $stackProc.HasExited) {
   Write-Host "  Stack pid: $($stackProc.Id) (start-cli-stack window; close it or kill PIDs under $PID_DIR)"

@@ -1,5 +1,5 @@
 # Archive an already-packed dist\ tree into a portable zip (T1).
-# Does not rebuild binaries — run pack-dist first.
+# Does not rebuild binaries - run pack-dist first.
 # Usage:
 #   .\scripts\archive-dist.ps1 [-DistPath <path>] [-OutDir <path>] [-Version <ver>] [-Platform <plat>]
 
