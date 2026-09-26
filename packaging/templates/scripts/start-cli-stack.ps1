@@ -233,7 +233,6 @@ function Start-DistBinary {
       -RedirectStandardOutput $LogPath `
       -RedirectStandardError $errPath `
       -PassThru `
-      -WindowStyle Hidden `
       -NoNewWindow
     return $p
   } finally {

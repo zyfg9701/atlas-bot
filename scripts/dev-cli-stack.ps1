@@ -237,7 +237,6 @@ function Start-CargoPackage {
       -RedirectStandardOutput $LogPath `
       -RedirectStandardError $errPath `
       -PassThru `
-      -WindowStyle Hidden `
       -NoNewWindow
     return $p
   } finally {
