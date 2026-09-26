@@ -7,10 +7,10 @@
 #   $env:ATLAS_AGENT_CLI='agent'; .\scripts\probe-agent-cli.ps1
 #
 # Exit codes:
-#   0  found (version/help smoke optional; unsupported → found-only)
+#   0  found (version/help smoke optional; unsupported -> found-only)
 #   1  not found
 #
-# Login state is NOT claimed here — confirm with PC Send after dev-cli-stack.ps1.
+# Login state is NOT claimed here - confirm with PC Send after dev-cli-stack.ps1.
 
 param(
   [string]$Cli = ''
@@ -73,7 +73,7 @@ function Resolve-AgentCli([string]$c) {
 }
 
 function Test-VersionOrHelpSmoke([string]$resolvedPath) {
-  # Non-interactive only. Never claim login. Unsupported flags → found-only.
+  # Non-interactive only. Never claim login. Unsupported flags -> found-only.
   $flags = @('--version', '-version', '--help', '-help', '-h')
   foreach ($flag in $flags) {
     $tmpOut = [System.IO.Path]::GetTempFileName()
@@ -91,7 +91,7 @@ function Test-VersionOrHelpSmoke([string]$resolvedPath) {
       # Heuristic: exit 0, or short help/version-looking output without clear "unknown option"
       $looksUnknown = $combined -match '(?i)unknown (option|flag|argument)|unrecognized|invalid option'
       if ($code -eq 0 -and -not $looksUnknown) {
-        $snippet = if ($combined.Length -gt 120) { $combined.Substring(0, 120) + '…' } else { $combined }
+        $snippet = if ($combined.Length -gt 120) { $combined.Substring(0, 120) + '...' } else { $combined }
         return @{ Ok = $true; Flag = $flag; ExitCode = $code; Snippet = $snippet }
       }
       if ($code -eq 0) { continue }
@@ -144,10 +144,10 @@ if ($smoke.Ok) {
   if ($smoke.Snippet) {
     Write-Host "    smoke snippet: $($smoke.Snippet)"
   }
-  Write-Host '    login: UNKNOWN (probe does not check auth — use PC Send)'
+  Write-Host '    login: UNKNOWN (probe does not check auth - use PC Send)'
 } else {
   Write-Host '    smoke: found-only (version/help flags unsupported or non-zero)'
-  Write-Host '    login: UNKNOWN (probe does not check auth — use PC Send)'
+  Write-Host '    login: UNKNOWN (probe does not check auth - use PC Send)'
 }
 
 Write-Host "    exit: 0"

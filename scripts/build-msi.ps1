@@ -1,5 +1,5 @@
-# T2·W / MSI1: build a per-user Windows MSI from an existing dist\ tree (WiX v4).
-# Does not rebuild binaries — run pack-dist.ps1 first.
+# T2.W / MSI1: build a per-user Windows MSI from an existing dist\ tree (WiX v4).
+# Does not rebuild binaries - run pack-dist.ps1 first.
 # Does NOT run on Linux/macOS (explicit failure).
 #
 # Usage:
@@ -11,7 +11,7 @@
 #
 # WiX: v4 only (`wix build`). UpgradeCode fixed in packaging\wix\Product.wxs.
 # Shortcuts: WiX Shortcut elements (not install-shortcuts.ps1).
-# See: packaging\wix\README.md · docs\packaging-skeleton.md § T2 MSI
+# See: packaging\wix\README.md . docs\packaging-skeleton.md section T2 MSI
 
 param(
   [string]$DistPath = '',
@@ -34,8 +34,8 @@ try {
 
 if (-not $isWindows) {
   Write-Host 'error: build-msi.ps1 only runs on Windows with WiX Toolset v4.' -ForegroundColor Red
-  Write-Host '  This host is not Windows — MSI is not produced here (Linux CI does not build MSI).' -ForegroundColor Red
-  Write-Host '  See packaging/wix/README.md and docs/packaging-skeleton.md § T2 MSI.' -ForegroundColor Yellow
+  Write-Host '  This host is not Windows - MSI is not produced here (Linux CI does not build MSI).' -ForegroundColor Red
+  Write-Host '  See packaging/wix/README.md and docs/packaging-skeleton.md section T2 MSI.' -ForegroundColor Yellow
   Write-Host '  On a Windows machine: install WiX v4 (`dotnet tool install --global wix`),' -ForegroundColor Yellow
   Write-Host '  run .\scripts\pack-dist.ps1 then .\scripts\build-msi.ps1.' -ForegroundColor Yellow
   exit 1
@@ -158,7 +158,7 @@ try {
   exit 1
 }
 
-# MSI ProductVersion: max 255.255.65535.65535 — clamp naive if needed
+# MSI ProductVersion: max 255.255.65535.65535 - clamp naive if needed
 $parts = $ProdVer.Split('.')
 if ([int]$parts[0] -gt 255) {
   Write-Host "error: ProductVersion major > 255: $ProdVer" -ForegroundColor Red
@@ -194,7 +194,7 @@ Write-Host '==> build-msi (WiX v4)'
 Write-Host "    file version:    $Ver  (-Version / ATLAS_BOT_VERSION / git describe / Cargo)"
 Write-Host "    ProductVersion:  $ProdVer  (MSI numeric; -ProductVersion override)"
 Write-Host "    UpgradeCode:     DAB90D5E-C3DB-405C-9024-769247FFC85F (fixed)"
-Write-Host "    scope:           perUser → %LOCALAPPDATA%\atlas-bot"
+Write-Host "    scope:           perUser -> %LOCALAPPDATA%\atlas-bot"
 Write-Host "    shortcuts:       WiX Shortcut (Start Menu on; Desktop Feature default off)"
 Write-Host "    dist:            $DistPath"
 Write-Host "    wix:             $wixVerText"

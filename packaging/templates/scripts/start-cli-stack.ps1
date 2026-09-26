@@ -1,5 +1,5 @@
 # Dist start skeleton: gateway(backend=cli) + Hub from dist\bin binaries (NOT cargo run).
-# Contract parity with scripts/dev-cli-stack.ps1 — see docs/packaging-skeleton.md §start.
+# Contract parity with scripts/dev-cli-stack.ps1 - see docs/packaging-skeleton.md section start.
 #
 # Usage:
 #   .\scripts\start-cli-stack.ps1
@@ -208,7 +208,7 @@ Write-Host "    MOCK_CLI_STREAM=$mockStreamDisp"
 $mockSleepDisp = if (Test-EnvSet 'MOCK_CLI_SLEEP_MS') { $env:MOCK_CLI_SLEEP_MS } else { '(unset)' }
 Write-Host "    MOCK_CLI_SLEEP_MS=$mockSleepDisp"
 if ($wantStream) {
-  Write-Host '    mode: Stream (-Stream / ATLAS_CLI_STACK_STREAM) — multi-process B1 only (no B2 dual)'
+  Write-Host '    mode: Stream (-Stream / ATLAS_CLI_STACK_STREAM) - multi-process B1 only (no B2 dual)'
 } else {
   Write-Host '    mode: text (pass -Stream or ATLAS_CLI_STACK_STREAM=1 for streaming)'
 }
@@ -312,7 +312,7 @@ function Wait-Healthz {
 }
 
 try {
-  Write-Host "==> starting atlas-bot-gateway (backend=$BACKEND) …"
+  Write-Host "==> starting atlas-bot-gateway (backend=$BACKEND) ..."
   if (Test-Path -LiteralPath $GW_LOG) { Remove-Item -LiteralPath $GW_LOG -Force -ErrorAction SilentlyContinue }
   $script:GwProcess = Start-DistBinary -ExePath $GW_BIN -LogPath $GW_LOG
   Set-Content -LiteralPath $GW_PID_FILE -Value $script:GwProcess.Id -Encoding ascii
@@ -324,7 +324,7 @@ try {
     Write-Host "    healthz: $($hz.Content)"
   } catch { }
 
-  Write-Host "==> starting atlas-bot-hub (ATLAS_GATEWAY_URL=$env:ATLAS_GATEWAY_URL) …"
+  Write-Host "==> starting atlas-bot-hub (ATLAS_GATEWAY_URL=$env:ATLAS_GATEWAY_URL) ..."
   if (Test-Path -LiteralPath $HUB_LOG) { Remove-Item -LiteralPath $HUB_LOG -Force -ErrorAction SilentlyContinue }
   $script:HubProcess = Start-DistBinary -ExePath $HUB_BIN -LogPath $HUB_LOG -ExtraEnv @{
     'ATLAS_GATEWAY_HTTP_BIND' = 'off'
@@ -338,14 +338,14 @@ try {
   Write-Host "  Invoke-WebRequest http://${GW_BIND}/healthz   # or: curl.exe -s http://${GW_BIND}/healthz"
   Write-Host "  Invoke-WebRequest http://${GW_BIND}/stats"
   $pcHint = Join-Path $Root 'pc'
-  Write-Host "  PC: open $pcHint → Connect → ws://${HUB_BIND}/ws → select agent → Send"
+  Write-Host "  PC: open $pcHint -> Connect -> ws://${HUB_BIND}/ws -> select agent -> Send"
   if ($wantStream -or (Test-EnvSet 'ATLAS_HUB_EVENT_URL')) {
-    Write-Host '  Streaming: PC Events ≥1× hub:assistant_delta → hub:turn_finished (B1 ingest; no B2 dual)'
+    Write-Host '  Streaming: PC Events >=1x hub:assistant_delta -> hub:turn_finished (B1 ingest; no B2 dual)'
   }
   Write-Host "  Logs: $GW_LOG  $HUB_LOG"
   Write-Host "  Stop: Ctrl-C (cleanup kills both) or Stop-Process -Id (Get-Content '$GW_PID_FILE'), (Get-Content '$HUB_PID_FILE')"
   Write-Host ''
-  Write-Host 'Foreground hold (Ctrl-C to stop)…'
+  Write-Host 'Foreground hold (Ctrl-C to stop)...'
 
   while ($true) {
     $gwAlive = Test-PidAlive -Proc $script:GwProcess -PidFile $GW_PID_FILE

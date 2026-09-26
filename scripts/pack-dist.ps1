@@ -15,7 +15,7 @@ Set-Location -LiteralPath $Root
 $Dist = Join-Path $Root 'dist'
 $Template = Join-Path $Root 'packaging\templates'
 
-Write-Host "==> pack-dist (Windows) → $Dist"
+Write-Host "==> pack-dist (Windows) -> $Dist"
 
 foreach ($sub in @('bin', 'pc', 'scripts')) {
   $p = Join-Path $Dist $sub
@@ -89,7 +89,7 @@ if (-not $SkipPc) {
   Write-Host '==> skip PC (-SkipPc)'
   Set-Content -LiteralPath (Join-Path $Dist 'pc\PLACEHOLDER.txt') -Encoding utf8 -Value @"
 PC binary not packed on this run (-SkipPc or missing deps).
-On a full pack host: npm run tauri -- build --no-bundle  → dist\pc\atlas-bot-pc.exe
+On a full pack host: npm run tauri -- build --no-bundle  -> dist\pc\atlas-bot-pc.exe
 "@
 }
 
