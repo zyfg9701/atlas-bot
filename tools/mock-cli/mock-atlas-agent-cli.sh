@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Mock Cursor/Atlas Agent CLI for CI / P3.5 / CS1 / CG1 smoke (no real Cursor login).
-# Compatible surface: accepts -p/--print and a prompt; prints a NON-ECHO reply.
+# Compatible surface: accepts both argv orders and prints a NON-ECHO reply.
+#   Atlas:  --output-format json|streaming-json|plain -p "<prompt>"
+#   Cursor: -p --output-format text|stream-json [--stream-partial-output] "<prompt>"
+# Format flags are ignored; MOCK_CLI_STREAM selects NDJSON vs one plain line.
 # MOCK_CLI_STREAM=1 → NDJSON assistant delta(s) then result (atlas-mock-reply…).
 # MOCK_CLI_TOOL / MOCK_CLI_TOOL_STATUS — override stream-json tool_call name/status (CG1).
 set -euo pipefail

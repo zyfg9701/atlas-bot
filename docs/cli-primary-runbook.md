@@ -16,7 +16,8 @@
 ```text
 PC (bot_client) ──WS──► Hub (:7700) ──HTTP──► atlas-bot-gateway (:8787, backend=cli)
                                                     │
-                                                    └─ spawn ATLAS_AGENT_CLI (-p …)
+                                                    └─ spawn ATLAS_AGENT_CLI
+                                                       Atlas: --output-format json -p "<prompt>"
 ```
 
 产品叙事：**对话 = 本机 Atlas/Cursor agent**。PC **只连 Hub**；不在 PC 内起 gateway。
@@ -119,13 +120,59 @@ cd clients/pc && npm i && npm run tauri dev
 | `ATLAS_GATEWAY_URL` | _(unset)_ | Hub：设为 `http://127.0.0.1:8787` 才走真 gateway；**unset = 嵌入 InMemory stub**（旁路） |
 | `ATLAS_GATEWAY_BACKEND` | `cli` | gateway 二进制默认 **cli** |
 | `ATLAS_AGENT_CLI` | `agent` | 本机 Cursor/Atlas agent 二进制；CI/Win 可指 `tools/mock-cli/mock-atlas-agent-cli.sh` 或 `.cmd` |
-| `ATLAS_AGENT_CLI_EXTRA_ARGS` | text 或 stream-json（见下） | JSON 字符串数组；**未设时**随 `ATLAS_AGENT_CLI_STREAM` 选默认 |
-| `ATLAS_AGENT_CLI_STREAM` | _(unset)_ | **CS1 显式 opt-in**：`1`/`true`/`yes` → 默认 EXTRA_ARGS 切 `--output-format stream-json` + `--stream-partial-output`，stdout **按行**解析 mid-turn |
+| `ATLAS_AGENT_CLI_DIALECT` | `atlas` | `atlas`（默认）或 `cursor` / `legacy`。决定默认 format 与 `-p` 是否吃掉下一个参数。见 §4b |
+| `ATLAS_AGENT_CLI_EXTRA_ARGS` | 随方言 + STREAM（见 §4b） | JSON 字符串数组。**设了就整段替换默认 format 旗标**；prompt 仍由 gateway 追加，不要把 prompt 写进这个数组 |
+| `ATLAS_AGENT_CLI_STREAM` | _(unset)_ | **CS1 显式 opt-in**：`1`/`true`/`yes` → stdout **按行**解析 mid-turn。默认 format：Atlas `streaming-json`；Cursor `stream-json` + `--stream-partial-output` |
 | `ATLAS_AGENT_CLI_TIMEOUT_MS` | _(none)_ | 单 turn 软超时；超时错误可见 |
 | `ATLAS_HUB_EVENT_URL` | _(unset)_ | **CS1b**：分进程时 POST RuntimeHint（与 Box B1 同）；失败只 warn。**勿与同进程 B2 bridge 双开** |
 | `ATLAS_HUB_EVENT_TOKEN` | _(unset)_ | B1 ingest Bearer / X-Atlas-Event-Token |
 | `ATLAS_GATEWAY_HTTP_BIND` | `127.0.0.1:8787` | gateway listen；Hub 挂远程时建议 `off` |
 | `ATLAS_HUB_BIND` | `127.0.0.1:7700` | Hub WS |
+
+---
+
+## 4b. CLI 方言（Atlas 默认 / Cursor 旧旗标）
+
+当前本机 Atlas `agent.exe`（路径类似 `C:\Users\…\.atlas\bin\agent.exe`）和旧 Cursor `agent` **不是同一套 argv**。
+
+| | Atlas（默认） | Cursor（`ATLAS_AGENT_CLI_DIALECT=cursor`） |
+|--|--|--|
+| `-p` | `--single <PROMPT>`，**下一个参数必须是 prompt** | `--print` 布尔旗标，prompt 是最后的位置参数 |
+| 非流式 | `--output-format json`，再 `-p "<prompt>"`。stdout 是一个 JSON 对象，回复取顶层 **`text`**（另有 `stopReason`、`sessionId`）。空 `text` 且 `stopReason` 不是 `end_turn`、或 `type=error` 的 `message`，当作失败，不把整段 JSON 当聊天正文 | `--output-format text`，argv 为 `-p --output-format text "<prompt>"` |
+| 流式 `STREAM=1` | `--output-format streaming-json`，再 `-p "<prompt>"`。**不**带 `--stream-partial-output`（Atlas 不认）。行协议：`type=text` 的 `data` 拼成回复，`type=end` 收尾，`type=tool_call` 用 `toolName` + `status=in_progress` | `--output-format stream-json` + `--stream-partial-output`，再位置 prompt。行协议仍是 `assistant` + `result` |
+| 合法 format | `plain`、`json`、`streaming-json`、`streaming-messages-json` | `text`、`json`、`stream-json` |
+
+已在 EricComputer 上对过的**能工作**形状（登录另说）：
+
+```text
+agent.exe --output-format json -p "hello U1"
+```
+
+会失败的旧默认（exit 2，stdout 空）：
+
+```text
+agent.exe -p --output-format text "hello U1"
+  → a value is required for '--single <PROMPT>'
+agent.exe --output-format text -p "hello U1"
+  → invalid value 'text'（可能值：plain, json, streaming-json, streaming-messages-json）
+```
+
+覆盖示例（不改代码）：
+
+```powershell
+# 只要纯文本、仍走 Atlas argv 顺序（format 在 -p 之前）
+$env:ATLAS_AGENT_CLI_EXTRA_ARGS='["--output-format","plain"]'
+
+# 整段回到旧 Cursor 旗标和旧 argv 顺序
+$env:ATLAS_AGENT_CLI_DIALECT='cursor'
+
+# Cursor 流式但自己指定旗标（方言仍决定 -p 放前面还是后面）
+$env:ATLAS_AGENT_CLI_DIALECT='cursor'
+$env:ATLAS_AGENT_CLI_STREAM='1'
+$env:ATLAS_AGENT_CLI_EXTRA_ARGS='["--output-format","stream-json","--stream-partial-output"]'
+```
+
+`plain` 不解析 JSON，stdout 整段就是回复。`json` 在退出码 0 时只取 `.text`；非零退出时若 stdout 是 `{"type":"error","message":"…"}`，错误文案用 `message`（例如未登录）。mock-cli **忽略** format 旗标，仍打印 `atlas-mock-reply…`，两种 argv 顺序都能跑。
 
 ---
 
@@ -144,7 +191,7 @@ cd clients/pc && npm i && npm run tauri dev
 
 ## 5b. CLI 流式（CS1）
 
-> 默认仍是 **text**（无 mid-turn）。设 `ATLAS_AGENT_CLI_STREAM=1` 才走真 stream-json 行协议。  
+> 默认仍是 **非流式**（无 mid-turn）：Atlas 用 `--output-format json` 取 `.text`。设 `ATLAS_AGENT_CLI_STREAM=1` 才按行读。Atlas 默认 `streaming-json`；Cursor 方言才是 `stream-json`。  
 > **禁止**假流式（把终稿切成假 delta）。不改 `bot.*`。
 
 ### 真机
@@ -161,10 +208,11 @@ ATLAS_AGENT_CLI_STREAM=1 \
 ### mock 流式（CI / 无真 agent）
 
 ```bash
-# 一条起 mock 流式输出（delta → sleep → result）
+# mock 忽略 format，两种顺序都能出 NDJSON（delta → sleep → result）
 MOCK_CLI_STREAM=1 MOCK_CLI_SLEEP_MS=80 \
-  ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh \
-  tools/mock-cli/mock-atlas-agent-cli.sh -p --output-format stream-json "hi"
+  tools/mock-cli/mock-atlas-agent-cli.sh --output-format streaming-json -p "hi"
+# 旧 Cursor 顺序同样可以：
+# tools/mock-cli/mock-atlas-agent-cli.sh -p --output-format stream-json "hi"
 
 # 冒烟（同进程 B2）
 MOCK_CLI_STREAM=1 cargo test -p atlas-bot-hub --test cli_stream_smoke -- --nocapture --test-threads=1
@@ -253,7 +301,8 @@ Hub **C1b**：未设 `ATLAS_GATEWAY_URL` 启动时 `warn!` 提示当前为 InMem
 6. Hub **默认仍可无 URL 起 stub**（不破坏单测）；改体验靠文档 + 脚本 + warn，**不**强制远程 gateway。  
 7. 未改 `bot.*`；未做 Box LLM / I2.2。  
 8. **W1 Windows：** PowerShell **5.1+**（亦支持 7+）；mock **已交** `tools/mock-cli/mock-atlas-agent-cli.cmd`（纯 cmd；Git Bash `.sh` 仍可用作备选）；PID 清理 = `.cli-stack-pids/*.pid` + `Stop-Process`（Ctrl-C / `finally`）；与 sh 的已知差异：healthz 用 `Invoke-WebRequest`（回退 `curl.exe`），mock `.cmd` 的 `chars=` 为纯长度（无 `cksum` hash）。  
-9. **CS1 流式：** 默认 **text**；`ATLAS_AGENT_CLI_STREAM=1` opt-in（见 §5b / [`cli-streaming-checklist.md`](./cli-streaming-checklist.md) §7）。未做假流式；未改 `bot.*`。  
+9. **CS1 流式：** 默认 **非流式**（Atlas JSON `.text`）；`ATLAS_AGENT_CLI_STREAM=1` opt-in（见 §4b / §5b / [`cli-streaming-checklist.md`](./cli-streaming-checklist.md) §7）。未做假流式；未改 `bot.*`。  
+9b. **方言：** 默认 Atlas（`--output-format json -p "<prompt>"`；流式 `streaming-json`，不带 `--stream-partial-output`）。旧 Cursor 设 `ATLAS_AGENT_CLI_DIALECT=cursor`。`ATLAS_AGENT_CLI_EXTRA_ARGS` 只替换 format 旗标。  
 10. **WS1·B Win 流式起法：** `-Stream` 或 `ATLAS_CLI_STACK_STREAM=1` 填未设默认（STREAM / EVENT_URL / insecure-or-token / mock 时 MOCK）；显式 env 优先；无开关 = text。Unix `.sh` **不**默认 STREAM（仅横幅/注释对齐）。分进程 mid-turn **仅 B1**。无 Win CI runner（WS2）。
 
 ---

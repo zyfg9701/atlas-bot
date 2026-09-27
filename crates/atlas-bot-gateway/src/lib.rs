@@ -56,7 +56,7 @@ pub use vnc::{
     rfb_handshake_none, spawn_loopback_mock_rfb, RfbProbe, DEFAULT_VNC_PROBE_TIMEOUT_MS,
     ENV_VNC_PROBE_TIMEOUT_MS,
 };
-pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_STREAM, ENV_AGENT_CLI_TIMEOUT_MS};
+pub use cli_gateway::{CliAgentGateway, ENV_AGENT_CLI, ENV_AGENT_CLI_ARGS, ENV_AGENT_CLI_DIALECT, ENV_AGENT_CLI_STREAM, ENV_AGENT_CLI_TIMEOUT_MS};
 pub use openai_gateway::{
     OpenAiCompatGateway, ENV_OPENAI_BASE, ENV_OPENAI_KEY, ENV_OPENAI_MODEL,
 };

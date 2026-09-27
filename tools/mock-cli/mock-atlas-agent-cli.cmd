@@ -1,6 +1,7 @@
 @echo off
 REM Mock Cursor/Atlas Agent CLI for Windows (no real Cursor login).
-REM Compatible surface: accepts flags + a prompt; prints a NON-ECHO reply.
+REM Compatible surface: flags + prompt, either order (Atlas -p PROMPT or Cursor -p flag).
+REM Format flags are ignored. MOCK_CLI_STREAM selects NDJSON vs one plain line.
 REM Reply MUST contain atlas-mock-reply (NOT Hub echo: stub).
 REM MOCK_CLI_STREAM=1 emits NDJSON assistant delta then result (same semantics as .sh).
 setlocal EnableExtensions EnableDelayedExpansion
