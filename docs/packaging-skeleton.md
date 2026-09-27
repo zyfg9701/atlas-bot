@@ -72,8 +72,9 @@ Mock bypass remains **dev-tree only** (`tools/mock-cli/…`); default dist does 
 |----------|-------------------|------------------------------|
 | Resolve `ATLAS_AGENT_CLI` / PATH `agent` | yes | yes |
 | Missing agent → exit ≠ 0, no silent stub | yes | yes |
-| Start gateway with `BACKEND=cli` | `cargo run -p atlas-bot-gateway` | `$ROOT/bin/atlas-bot-gateway` |
-| Start Hub with `GATEWAY_URL` + `HTTP_BIND=off` | `cargo run -p atlas-bot-hub` | `$ROOT/bin/atlas-bot-hub` |
+| Start gateway with `BACKEND=cli` | `cargo run -p atlas-bot-gateway --bin atlas-bot-gateway` | `$ROOT/bin/atlas-bot-gateway` |
+| Start Hub with `GATEWAY_URL` + `HTTP_BIND=off` | `cargo run -p atlas-bot-hub --bin atlas-bot-hub` | `$ROOT/bin/atlas-bot-hub` |
+| Foreground hold | gateway + Hub `/healthz` (cargo/child pid is cleanup only) | same |
 | Wait healthz gateway + Hub | yes | yes |
 | PID + log dirs | `.cli-stack-pids` / `.cli-stack-logs` | same under dist/install root |
 | Win `-Stream` / `ATLAS_CLI_STACK_STREAM` | yes | yes |

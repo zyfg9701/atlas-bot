@@ -203,10 +203,23 @@ echo "  PC: open $ROOT/pc/ (or installed pc/) → Connect → ws://${HUB_BIND}/w
 echo "  Logs: $GW_LOG  $HUB_LOG"
 echo "  Stop: Ctrl-C (trap kills both) or kill \$(cat $GW_PID_FILE) \$(cat $HUB_PID_FILE)"
 echo
-echo "Foreground hold (Ctrl-C to stop)…"
-while kill -0 "$(cat "$GW_PID_FILE")" 2>/dev/null \
-   && kill -0 "$(cat "$HUB_PID_FILE")" 2>/dev/null; do
-  sleep 2
+echo "Foreground hold (Ctrl-C to stop; watches /healthz)…"
+# Watch healthz, not the child pid. PIDs stay for the EXIT trap only.
+# One miss is retried so a single timeout does not tear the stack down.
+stack_healthz_ok() {
+  curl -sf --max-time 2 "http://${GW_BIND}/healthz" >/dev/null 2>&1 \
+    && curl -sf --max-time 2 "http://${HUB_BIND}/healthz" >/dev/null 2>&1
+}
+while true; do
+  if stack_healthz_ok; then
+    sleep 2
+    continue
+  fi
+  sleep 1
+  if stack_healthz_ok; then
+    sleep 2
+    continue
+  fi
+  echo "healthz failed; shutting down" >&2
+  exit 1
 done
-echo "a child exited; shutting down" >&2
-exit 1

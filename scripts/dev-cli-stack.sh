@@ -132,7 +132,7 @@ echo
 
 # Ensure release/debug binaries exist (cargo run is fine)
 echo "==> starting atlas-bot-gateway (backend=$BACKEND) …"
-cargo run -p atlas-bot-gateway --quiet >"$GW_LOG" 2>&1 &
+cargo run -p atlas-bot-gateway --bin atlas-bot-gateway --quiet >"$GW_LOG" 2>&1 &
 echo $! >"$GW_PID_FILE"
 
 # Wait for healthz
@@ -161,7 +161,7 @@ done
 echo "==> starting atlas-bot-hub (ATLAS_GATEWAY_URL=$ATLAS_GATEWAY_URL) …"
 # Disable embedded gateway HTTP on Hub (remote gateway owns :8787)
 ATLAS_GATEWAY_HTTP_BIND=off \
-  cargo run -p atlas-bot-hub --quiet >"$HUB_LOG" 2>&1 &
+  cargo run -p atlas-bot-hub --bin atlas-bot-hub --quiet >"$HUB_LOG" 2>&1 &
 echo $! >"$HUB_PID_FILE"
 
 echo -n "    waiting for Hub /healthz"
@@ -194,11 +194,24 @@ echo "  PC: Connect → ws://${HUB_BIND}/ws → select agent → Send"
 echo "  Logs: $GW_LOG  $HUB_LOG"
 echo "  Stop: Ctrl-C (trap kills both) or kill \$(cat $GW_PID_FILE) \$(cat $HUB_PID_FILE)"
 echo
-echo "Foreground hold (Ctrl-C to stop)…"
-# Keep script alive so trap cleanup works; also re-check children
-while kill -0 "$(cat "$GW_PID_FILE")" 2>/dev/null \
-   && kill -0 "$(cat "$HUB_PID_FILE")" 2>/dev/null; do
-  sleep 2
+echo "Foreground hold (Ctrl-C to stop; watches /healthz)…"
+# Keep the script alive so the EXIT trap can clean up. Watch healthz, not the
+# cargo pid: `cargo run` can exit while the servers still answer. PIDs stay for
+# cleanup only. One miss is retried so a single timeout does not tear the stack down.
+stack_healthz_ok() {
+  curl -sf --max-time 2 "http://${GW_BIND}/healthz" >/dev/null 2>&1 \
+    && curl -sf --max-time 2 "http://${HUB_BIND}/healthz" >/dev/null 2>&1
+}
+while true; do
+  if stack_healthz_ok; then
+    sleep 2
+    continue
+  fi
+  sleep 1
+  if stack_healthz_ok; then
+    sleep 2
+    continue
+  fi
+  echo "healthz failed; shutting down" >&2
+  exit 1
 done
-echo "a child exited; shutting down" >&2
-exit 1
