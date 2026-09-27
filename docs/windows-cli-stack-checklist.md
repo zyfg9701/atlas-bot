@@ -102,7 +102,8 @@ mock 回归仍用上方 W-E* / W-S*；真机证据可合后补。
 |----|------|
 | PowerShell | **5.1+**（7+ 亦可）。5.1 读取无 BOM 的 `.ps1` 时用系统 ANSI（中文 Windows 为 GBK）；这些脚本须保持纯 ASCII 字符串，或存成带 UTF-8 BOM 的文件，否则多字节标点会吃掉引号并解析失败。 |
 | mock | **已交** `.cmd`；Git Bash `.sh` 备选；流式分支 **零补丁**（CS1 已齐；`timeout` **秒级**粒度） |
-| PID 清理 | `.cli-stack-pids/{gateway,hub}.pid` + Ctrl-C/`finally` → `Stop-Process` |
+| PID 清理 | `.cli-stack-pids/{gateway,hub}.pid` + Ctrl-C/`finally` → `Stop-Process`（尽力清理；不作为存活判定） |
+| 前台保活 | 看 gateway 与 Hub 的 `/healthz`。`cargo` 进程退出而 healthz 仍成功时不拆栈。`cargo run` 显式 `--bin atlas-bot-gateway` / `--bin atlas-bot-hub`（Hub 包另有 `mint-jwt`） |
 | 与 sh 差异 | healthz：`Invoke-WebRequest`（回退 `curl.exe`）；mock `.cmd` 无 `cksum` hash，仅 `chars=`；Win 有 `-Stream` 默认填充，Unix `.sh` 仅横幅/注释对齐、**不**默认 STREAM |
 | `-Stream` / `ATLAS_CLI_STACK_STREAM` | 二者等价；填未设的 STREAM=1、EVENT_URL=`http://127.0.0.1:7701/internal/runtime-hint`、无 token 时 INSECURE=1、mock `.cmd` 时 MOCK_CLI_STREAM=1 |
 | 显式 env 优先 | 用户已设 STREAM / EVENT_URL / MOCK / TOKEN / INSECURE 时 **不覆盖** |

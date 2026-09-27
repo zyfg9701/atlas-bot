@@ -217,6 +217,7 @@ Write-Host ''
 function Start-CargoPackage {
   param(
     [Parameter(Mandatory)][string]$Package,
+    [Parameter(Mandatory)][string]$Bin,
     [Parameter(Mandatory)][string]$LogPath,
     [hashtable]$ExtraEnv = @{}
   )
@@ -231,8 +232,10 @@ function Start-CargoPackage {
   try {
     # Quote-safe: WorkingDirectory / Redirect* are .NET strings (spaces OK, e.g. E:\GitHub\...)
     # ArgumentList as single string is more reliable on Windows PowerShell 5.1
+    # Hub has atlas-bot-hub + mint-jwt; cargo run without --bin exits immediately.
+    # Gateway has a single bin; --bin is still passed so both invocations match.
     $p = Start-Process -FilePath 'cargo' `
-      -ArgumentList "run -p $Package --quiet" `
+      -ArgumentList "run -p $Package --bin $Bin --quiet" `
       -WorkingDirectory $Root `
       -RedirectStandardOutput $LogPath `
       -RedirectStandardError $errPath `
@@ -257,6 +260,12 @@ function Test-HttpOk([string]$Url) {
     }
     return $false
   }
+}
+
+# Foreground hold signal. Cargo's process can exit while the servers still answer
+# (rustup shim / wrapper). PID files stay for Stop-StackChildren only.
+function Test-StackHealthz {
+  return ((Test-HttpOk "http://${GW_BIND}/healthz") -and (Test-HttpOk "http://${HUB_BIND}/healthz"))
 }
 
 function Test-PidAlive([System.Diagnostics.Process]$Proc, [string]$PidFile) {
@@ -317,7 +326,7 @@ function Wait-Healthz {
 try {
   Write-Host "==> starting atlas-bot-gateway (backend=$BACKEND) ..."
   if (Test-Path -LiteralPath $GW_LOG) { Remove-Item -LiteralPath $GW_LOG -Force -ErrorAction SilentlyContinue }
-  $script:GwProcess = Start-CargoPackage -Package 'atlas-bot-gateway' -LogPath $GW_LOG
+  $script:GwProcess = Start-CargoPackage -Package 'atlas-bot-gateway' -Bin 'atlas-bot-gateway' -LogPath $GW_LOG
   Set-Content -LiteralPath $GW_PID_FILE -Value $script:GwProcess.Id -Encoding ascii
 
   Wait-Healthz -Bind $GW_BIND -Proc $script:GwProcess -PidFile $GW_PID_FILE -LogPath $GW_LOG -Label 'gateway'
@@ -330,7 +339,7 @@ try {
   Write-Host "==> starting atlas-bot-hub (ATLAS_GATEWAY_URL=$env:ATLAS_GATEWAY_URL) ..."
   if (Test-Path -LiteralPath $HUB_LOG) { Remove-Item -LiteralPath $HUB_LOG -Force -ErrorAction SilentlyContinue }
   # Disable embedded gateway HTTP on Hub (remote gateway owns :8787) - same as sh
-  $script:HubProcess = Start-CargoPackage -Package 'atlas-bot-hub' -LogPath $HUB_LOG -ExtraEnv @{
+  $script:HubProcess = Start-CargoPackage -Package 'atlas-bot-hub' -Bin 'atlas-bot-hub' -LogPath $HUB_LOG -ExtraEnv @{
     'ATLAS_GATEWAY_HTTP_BIND' = 'off'
   }
   Set-Content -LiteralPath $HUB_PID_FILE -Value $script:HubProcess.Id -Encoding ascii
@@ -348,14 +357,17 @@ try {
   Write-Host "  Logs: $GW_LOG  $HUB_LOG"
   Write-Host "  Stop: Ctrl-C (cleanup kills both) or Stop-Process -Id (Get-Content '$GW_PID_FILE'), (Get-Content '$HUB_PID_FILE')"
   Write-Host ''
-  Write-Host 'Foreground hold (Ctrl-C to stop)...'
+  Write-Host 'Foreground hold (Ctrl-C to stop; watches /healthz)...'
 
+  # Do not treat cargo HasExited as stack death while both healthz endpoints succeed.
+  # One miss is retried so a single timeout does not tear the stack down.
   while ($true) {
-    $gwAlive = Test-PidAlive -Proc $script:GwProcess -PidFile $GW_PID_FILE
-    $hubAlive = Test-PidAlive -Proc $script:HubProcess -PidFile $HUB_PID_FILE
-    if (-not $gwAlive -or -not $hubAlive) {
-      Write-Host 'a child exited; shutting down' -ForegroundColor Yellow
-      exit 1
+    if (-not (Test-StackHealthz)) {
+      Start-Sleep -Seconds 1
+      if (-not (Test-StackHealthz)) {
+        Write-Host 'healthz failed; shutting down' -ForegroundColor Yellow
+        exit 1
+      }
     }
     Start-Sleep -Seconds 2
   }

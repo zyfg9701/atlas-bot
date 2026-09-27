@@ -255,6 +255,12 @@ function Test-HttpOk([string]$Url) {
   }
 }
 
+# Foreground hold signal. Process exit is not stack death while healthz still succeeds.
+# PID files stay for Stop-StackChildren only.
+function Test-StackHealthz {
+  return ((Test-HttpOk "http://${GW_BIND}/healthz") -and (Test-HttpOk "http://${HUB_BIND}/healthz"))
+}
+
 function Test-PidAlive([System.Diagnostics.Process]$Proc, [string]$PidFile) {
   if ($Proc -and -not $Proc.HasExited) { return $true }
   if (Test-Path -LiteralPath $PidFile) {
@@ -344,14 +350,17 @@ try {
   Write-Host "  Logs: $GW_LOG  $HUB_LOG"
   Write-Host "  Stop: Ctrl-C (cleanup kills both) or Stop-Process -Id (Get-Content '$GW_PID_FILE'), (Get-Content '$HUB_PID_FILE')"
   Write-Host ''
-  Write-Host 'Foreground hold (Ctrl-C to stop)...'
+  Write-Host 'Foreground hold (Ctrl-C to stop; watches /healthz)...'
 
+  # Do not treat process HasExited as stack death while both healthz endpoints succeed.
+  # One miss is retried so a single timeout does not tear the stack down.
   while ($true) {
-    $gwAlive = Test-PidAlive -Proc $script:GwProcess -PidFile $GW_PID_FILE
-    $hubAlive = Test-PidAlive -Proc $script:HubProcess -PidFile $HUB_PID_FILE
-    if (-not $gwAlive -or -not $hubAlive) {
-      Write-Host 'a child exited; shutting down' -ForegroundColor Yellow
-      exit 1
+    if (-not (Test-StackHealthz)) {
+      Start-Sleep -Seconds 1
+      if (-not (Test-StackHealthz)) {
+        Write-Host 'healthz failed; shutting down' -ForegroundColor Yellow
+        exit 1
+      }
     }
     Start-Sleep -Seconds 2
   }
