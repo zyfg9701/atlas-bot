@@ -118,7 +118,7 @@ Wired in `protocol-conformance` like `runtime_deepen_smoke` / `private_resident_
 sendPrompt (backend=cli, product default)
         │
         ▼
-  spawn ATLAS_AGENT_CLI (-p [, stream-json])
+  spawn ATLAS_AGENT_CLI (Atlas: format flags then -p <prompt>; Cursor dialect: -p then flags)
         │
         ├─ text mode → no mid-turn tool_call → CG1 does NOT claim coverage
         │
@@ -139,7 +139,7 @@ sendPrompt (backend=cli, product default)
 
 | Mode | CG1 coverage |
 |------|----------------|
-| `ATLAS_AGENT_CLI_STREAM=1` + stream-json / ATLAS_TOOL | **Yes** — dangerous `started` gated |
+| `ATLAS_AGENT_CLI_STREAM=1` + streaming-json / stream-json / ATLAS_TOOL | **Yes** — dangerous `started` or Atlas `in_progress` gated |
 | Text / stream off | **No** — cannot see mid-turn tools; do not claim coverage |
 | CLI tools that never emit to stdout | **No** |
 

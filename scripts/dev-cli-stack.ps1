@@ -195,6 +195,8 @@ Write-Host "    GATEWAY_URL:  $env:ATLAS_GATEWAY_URL"
 # Streaming / B1 / mock (always print - unset shown as empty)
 $streamDisp = if (Test-EnvSet 'ATLAS_AGENT_CLI_STREAM') { $env:ATLAS_AGENT_CLI_STREAM } else { '(unset=text)' }
 Write-Host "    ATLAS_AGENT_CLI_STREAM=$streamDisp"
+$dialectDisp = if (Test-EnvSet 'ATLAS_AGENT_CLI_DIALECT') { $env:ATLAS_AGENT_CLI_DIALECT } else { 'atlas' }
+Write-Host "    ATLAS_AGENT_CLI_DIALECT=$dialectDisp"
 $eventUrlDisp = if (Test-EnvSet 'ATLAS_HUB_EVENT_URL') { $env:ATLAS_HUB_EVENT_URL } else { '(unset)' }
 Write-Host "    ATLAS_HUB_EVENT_URL=$eventUrlDisp"
 if (Test-EnvSet 'ATLAS_HUB_EVENT_TOKEN') {

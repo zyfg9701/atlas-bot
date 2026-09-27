@@ -83,6 +83,16 @@ $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"
 - [ ] 无 `-Stream`：不自动设 STREAM / EVENT_URL / MOCK  
 - [ ] Send 仍可得终稿；无强制 `hub:assistant_delta`（与 CS1 text 一致）
 
+## 方言（真机 `agent.exe`）
+
+默认 **atlas**：非流式 spawn 是 `--output-format json -p "<prompt>"`，回复取 JSON 的 `text`。流式是 `--output-format streaming-json -p "<prompt>"`，不带 `--stream-partial-output`。
+
+旧 Cursor 二进制：`$env:ATLAS_AGENT_CLI_DIALECT='cursor'`（回到 `-p --output-format text` / `stream-json` + `--stream-partial-output`）。
+
+只要换 format、仍用 Atlas 的 `-p <prompt>` 顺序：`$env:ATLAS_AGENT_CLI_EXTRA_ARGS='["--output-format","plain"]'`（设了就替换默认旗标，不要把 prompt 写进去）。
+
+mock `.cmd` / `.sh` 忽略 format，W-E* / W-S* 不用改环境。Send 若 `exit 2` 且抱怨 `--single` 或 `invalid value 'text'`，是方言没对齐，不是登录失败。完整对照：[`cli-primary-runbook.md`](./cli-primary-runbook.md) §4b。
+
 ## W-L* · 真机联调指针（L1）
 
 > 真机已登录 agent 的完整步骤、失败对照、mock↔真机切换见独立页（避免与 W-E*/W-S* mock 叙事双源漂移）：  
@@ -90,7 +100,7 @@ $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"
 
 | 位 | 勾选意图 | 入口 |
 |----|----------|------|
-| **W-L1** | 真机 text：`dev-cli-stack.ps1` → healthz `backend=cli` + `agent_cli_found=true` + `agent_cli` 非 mock → Connect/Send → 终稿 **非** `echo:` / **非** `atlas-mock-reply` | live checklist L-E4 / L-E6 / L-E7 |
+| **W-L1** | 真机 text：`dev-cli-stack.ps1` → healthz `backend=cli` + `agent_cli_found=true` + `agent_cli` 非 mock → Connect/Send `hello U1` → **不是** format/`-p` 的 exit 2；终稿 **非** `echo:` / **非** `atlas-mock-reply`（登录仍要另做） | live checklist L-E4 / L-E6 / L-E7 |
 | **W-L2** | 真机 `-Stream`：横幅 STREAM + EVENT_URL、**无**自动 MOCK → ≥1× `hub:assistant_delta` → `hub:turn_finished` | live checklist L-E5 / L-E7 |
 | **W-L3** | 探测：`.\scripts\probe-agent-cli.ps1` → found + path；**不**声称已登录 | live checklist L-E3 |
 

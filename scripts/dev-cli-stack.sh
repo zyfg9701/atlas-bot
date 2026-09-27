@@ -119,6 +119,7 @@ echo "    gateway bind: $GW_BIND"
 echo "    Hub WS:       ws://${HUB_BIND}/ws"
 echo "    GATEWAY_URL:  $ATLAS_GATEWAY_URL"
 echo "    ATLAS_AGENT_CLI_STREAM=${ATLAS_AGENT_CLI_STREAM:-(unset=text)}"
+echo "    ATLAS_AGENT_CLI_DIALECT=${ATLAS_AGENT_CLI_DIALECT:-atlas}"
 echo "    ATLAS_HUB_EVENT_URL=${ATLAS_HUB_EVENT_URL:-(unset)}"
 if [[ -n "${ATLAS_HUB_EVENT_TOKEN:-}" ]]; then
   echo "    ATLAS_HUB_EVENT_TOKEN=(set)"

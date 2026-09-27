@@ -76,7 +76,8 @@ Invoke-WebRequest http://127.0.0.1:8787/healthz | Select-Object -Expand Content
 
 - [ ] healthz：`backend=cli` + `agent_cli_found=true`
 - [ ] healthz `agent_cli` 字符串指向**真**二进制（**非** `mock-atlas-agent-cli.cmd`）
-- [ ] 横幅：`ATLAS_AGENT_CLI_STREAM=(unset=text)`；未自动 MOCK
+- [ ] 横幅：`ATLAS_AGENT_CLI_STREAM=(unset=text)`；`ATLAS_AGENT_CLI_DIALECT` 未设则是 **atlas**；未自动 MOCK
+- [ ] 未设 `ATLAS_AGENT_CLI_EXTRA_ARGS` 时，Send 的 spawn 是 `--output-format json -p "<prompt>"`（不是 `-p --output-format text`）
 
 ---
 
@@ -121,7 +122,8 @@ Invoke-WebRequest http://127.0.0.1:8787/healthz | Select-Object -Expand Content
 | 现象 | 常见根因 | 期望表现 | 处置 |
 |------|----------|----------|------|
 | ps1 立刻 exit 1 | **未装** / PATH 无 / 路径错 | `ATLAS_AGENT_CLI not found`；**不起** Hub-only stub | 安装 agent 或设绝对路径；临时对照用 mock（见切换表） |
-| 起栈 OK，Send 失败 / 非零 exit | **未登录** / auth 过期 | gateway 错误可见；**不假成功** | 人工重新登录 agent；重试 Send（探针**不能**证明已登录） |
+| Send `CLI non-zero exit 2`，stdout 空，stderr 要 `--single <PROMPT>` 或 `invalid value 'text'` | **方言不对**：旧 argv 把 `-p` 当布尔旗标，或 format 用了 `text` / `stream-json` | Atlas `agent.exe` 认 `--output-format json -p "<prompt>"`（流式 `streaming-json`，不要 `--stream-partial-output`） | 拉到含方言修复的版本后重起栈再 Send `hello U1`。仍要旧 Cursor 时设 `ATLAS_AGENT_CLI_DIALECT=cursor`。只要纯文本：`ATLAS_AGENT_CLI_EXTRA_ARGS='["--output-format","plain"]'`。登录失败是另一条（下一行） |
+| 起栈 OK，Send 失败 / 非零 exit | **未登录** / auth 过期 | gateway 错误可见（JSON `message` 会进文案）；**不假成功** | 人工重新登录 agent；重试 Send（探针**不能**证明已登录） |
 | 仅终稿、无 mid-turn | **无 STREAM** / 未 `-Stream` / 未设 EVENT_URL | 与 CS1 text 一致 | `.\scripts\dev-cli-stack.ps1 -Stream` 或显式 `ATLAS_AGENT_CLI_STREAM=1` + EVENT_URL |
 | preview 含 `atlas-mock-reply` | **误用 mock** 仍指向 mock `.cmd` | 属 mock 路径（W-E*/W-S*） | 清 `$env:ATLAS_AGENT_CLI` 或改回真 `agent`；勿留 `MOCK_CLI_*` |
 | preview 含 `echo:` | **Hub-only stub**（未挂 `ATLAS_GATEWAY_URL`） | InMemory 旁路 | **必须**经 `dev-cli-stack.ps1`；禁止只起 Hub |
@@ -137,7 +139,7 @@ Invoke-WebRequest http://127.0.0.1:8787/healthz | Select-Object -Expand Content
 | → 真机 | **去掉** mock 覆盖：`Remove-Item Env:ATLAS_AGENT_CLI -ErrorAction SilentlyContinue` **或**显式设真 `agent` 路径；**不要**留 `MOCK_CLI_STREAM` / `MOCK_CLI_SLEEP_MS`；`-Stream` 时只填 STREAM + EVENT_URL（真机不自动 MOCK） |
 | 验证切成功 | healthz `agent_cli` 字段指向真二进制（字符串不含 `mock-atlas-agent-cli`）；Send 回复 **无** `atlas-mock-reply` / **无** `echo:` |
 
-环境变量名与 Unix **相同**（PowerShell `$env:ATLAS_*`）。用户已设 `ATLAS_AGENT_CLI_EXTRA_ARGS` 时不被静默覆盖。
+环境变量名与 Unix **相同**（PowerShell `$env:ATLAS_*`）。用户已设 `ATLAS_AGENT_CLI_EXTRA_ARGS` 时不被静默覆盖（它替换默认 format 旗标，prompt 仍由 gateway 追加）。方言默认 **atlas**；旧 Cursor 二进制设 `ATLAS_AGENT_CLI_DIALECT=cursor`。细节见 [`cli-primary-runbook.md`](./cli-primary-runbook.md) §4b。
 
 **一句：** 清 `ATLAS_AGENT_CLI` / `MOCK_CLI_*` → 起 `dev-cli-stack.ps1`（可选 `-Stream`）→ 看 healthz `agent_cli` 字符串。
 
@@ -163,7 +165,7 @@ Invoke-WebRequest http://127.0.0.1:8787/healthz | Select-Object -Expand Content
 | 文档落盘形态 | **独立页**本文件 + windows checklist **W-L*** 短节 + 双向链（防双源漂移；大段步骤只维护本页） |
 | L1b 脚本 | `scripts/probe-agent-cli.ps1`；尝试非交互 `-version` / `--version` / `-help` / `--help`；均不支持则 **仅 found**；**从不**声称已登录 |
 | 真机证据 | **合后催本机**（EricComputer）：L-E1 text 终稿 + L-E2 `-Stream` ≥1× delta；缺截图**不单独挡合**（能力已在 CS1/WS1） |
-| agent CLI 版本差异 | 各发行版 version/help 旗标不一；stream-json / partial 行为随 Cursor/Atlas agent 版本变化——若无 delta，先确认 `-Stream` 与登录，再注明版本限制 |
+| agent CLI 版本差异 | 各发行版 version/help 旗标不一。Atlas `agent.exe` 的 format 是 `plain|json|streaming-json|streaming-messages-json`，`-p` 要带 prompt；旧 Cursor 才是 `text` / `stream-json` + `--stream-partial-output`。若无 delta，先确认 `-Stream`、方言和登录，再注明版本限制 |
 | 与 mock 回归 | W-E* / W-S* **必须保留**；unset STREAM 仍 text；Unix `p35`/`cli_stream`/`b1` 冒烟不回退 |
 | 不在范围 | I2.2 · 改 `bot.*` · 假流式 · 自动登录 · 真机 CI 门禁 · 重写 `CliAgentGateway` · 删 mock |
 

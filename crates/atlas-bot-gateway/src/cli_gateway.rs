@@ -1,13 +1,17 @@
 //! Scheme B: Cursor / Atlas Agent CLI adapter gateway.
 //!
-//! `sendPrompt` spawns `ATLAS_AGENT_CLI` (default `agent`) with `-p` /
-//! `--print` and returns a **non-echo** model reply. Child processes are
-//! interruptible via `interruptAgentRun` (measurable `start_kill`).
+//! `sendPrompt` spawns `ATLAS_AGENT_CLI` (default `agent`). The default
+//! dialect is Atlas headless (`--output-format json` then `-p <prompt>`,
+//! because `-p` / `--single` takes the prompt as its value). JSON stdout
+//! uses the top-level `text` field. Set `ATLAS_AGENT_CLI_DIALECT=cursor`
+//! to restore the legacy Cursor shape (`-p` flag, then `--output-format text`
+//! or `stream-json` + `--stream-partial-output`, then a positional prompt).
 //!
-//! CS1 streaming (opt-in via `ATLAS_AGENT_CLI_STREAM=1`): line-read stdout,
-//! map stream-json / `ATLAS_DELTA` → [`RuntimeHint`] mid-turn, then Finished.
-//! Never fake-streams a final reply into deltas. Optional B1 POST when
-//! `ATLAS_HUB_EVENT_URL` is set (fail-warn only).
+//! CS1 streaming (opt-in via `ATLAS_AGENT_CLI_STREAM=1`): line-read stdout.
+//! Atlas default is `--output-format streaming-json` (no `--stream-partial-output`).
+//! Cursor dialect keeps `stream-json`. Map those lines / `ATLAS_DELTA` →
+//! [`RuntimeHint`] mid-turn, then Finished. Never fake-streams a final reply
+//! into deltas. Optional B1 POST when `ATLAS_HUB_EVENT_URL` is set (fail-warn only).
 //!
 //! CG1 tool approval (reuses GA1 [`ApprovalState`] + `POST /approve`):
 //! when stream is on, dangerous `tool_call` status=started (and mock
@@ -38,23 +42,125 @@ use crate::tool_approval::{
     GateOutcome, ToolApprovalMode,
 };
 use crate::{
+    agent_summary_value,
     box_sidecar::{ENV_HUB_EVENT_TOKEN, ENV_HUB_EVENT_URL, HUB_EVENT_POST_TIMEOUT_MS},
-    agent_summary_value, AgentRecord, Gateway, GatewayError, TranscriptEntry, RuntimeHint, DEFAULT_AGENT_ID,
+    AgentRecord, Gateway, GatewayError, RuntimeHint, TranscriptEntry, DEFAULT_AGENT_ID,
     DEFAULT_AGENT_NAME,
 };
 
 /// Env var for the CLI binary path (Cursor `agent` / `cursor-agent` / mock).
 pub const ENV_AGENT_CLI: &str = "ATLAS_AGENT_CLI";
-/// Optional extra args (JSON array of strings), e.g. `["--output-format","text"]`.
+/// Optional extra args (JSON array of strings), e.g. `["--output-format","plain"]`.
+/// When set, replaces the dialect default. Prompt is still appended by the gateway
+/// (`-p <prompt>` on Atlas; positional after `-p` on Cursor). Do not put the prompt here.
 pub const ENV_AGENT_CLI_ARGS: &str = "ATLAS_AGENT_CLI_EXTRA_ARGS";
 /// Soft timeout for a single CLI turn (ms). 0 = no timeout.
 pub const ENV_AGENT_CLI_TIMEOUT_MS: &str = "ATLAS_AGENT_CLI_TIMEOUT_MS";
-/// Opt-in CS1 streaming: `1`/`true`/`yes` → EXTRA_ARGS default becomes
-/// `--output-format stream-json` (+ `--stream-partial-output`) and stdout is
-/// line-parsed for mid-turn [`RuntimeHint`]s. Unset = text mode (today).
+/// Opt-in CS1 streaming: `1`/`true`/`yes` → line-parse stdout for mid-turn
+/// [`RuntimeHint`]s. Unset = text/json document mode (no mid-turn).
+/// Default EXTRA_ARGS (when unset) follow [`ENV_AGENT_CLI_DIALECT`]:
+/// Atlas `streaming-json`; Cursor `stream-json` + `--stream-partial-output`.
 pub const ENV_AGENT_CLI_STREAM: &str = "ATLAS_AGENT_CLI_STREAM";
+/// `atlas` (default) or `cursor` / `legacy`. Controls default format flags and
+/// whether `-p` takes the prompt as its value (Atlas) or is a boolean print flag
+/// (Cursor).
+pub const ENV_AGENT_CLI_DIALECT: &str = "ATLAS_AGENT_CLI_DIALECT";
 
 const DEFAULT_CLI: &str = "agent";
+
+/// Which Agent CLI flag dialect to spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliDialect {
+    /// Atlas / current `agent.exe`: `-p`/`--single <PROMPT>` consumes the next
+    /// argv; formats `plain|json|streaming-json|streaming-messages-json`.
+    Atlas,
+    /// Legacy Cursor agent: `-p`/`--print` is a flag; prompt is positional;
+    /// formats `text` and `stream-json` (+ `--stream-partial-output`).
+    Cursor,
+}
+
+impl CliDialect {
+    fn parse(raw: Option<&str>) -> Self {
+        match raw
+            .map(str::trim)
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("cursor") | Some("legacy") => CliDialect::Cursor,
+            _ => CliDialect::Atlas,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            CliDialect::Atlas => "atlas",
+            CliDialect::Cursor => "cursor",
+        }
+    }
+}
+
+struct CliSpawnPlan {
+    dialect: CliDialect,
+    extra_args: Vec<String>,
+    stream: bool,
+}
+
+fn resolve_spawn_plan(
+    dialect_raw: Option<&str>,
+    stream: bool,
+    extra_args_raw: Option<&str>,
+) -> CliSpawnPlan {
+    let dialect = CliDialect::parse(dialect_raw);
+    let extra_args = extra_args_raw
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_else(|| default_extra_args(dialect, stream));
+    CliSpawnPlan {
+        dialect,
+        extra_args,
+        stream,
+    }
+}
+
+/// Argv after the binary name.
+///
+/// Atlas: format flags, then `-p`, then the prompt as the value of `-p`.
+/// Cursor: `-p` flag, then format flags, then the positional prompt.
+fn build_cli_argv(dialect: CliDialect, extra_args: &[String], prompt: &str) -> Vec<String> {
+    match dialect {
+        CliDialect::Atlas => {
+            let mut v = extra_args.to_vec();
+            v.push("-p".into());
+            v.push(prompt.into());
+            v
+        }
+        CliDialect::Cursor => {
+            let mut v = Vec::with_capacity(extra_args.len() + 2);
+            v.push("-p".into());
+            v.extend(extra_args.iter().cloned());
+            v.push(prompt.into());
+            v
+        }
+    }
+}
+
+fn output_format_value(extra_args: &[String]) -> Option<&str> {
+    let mut iter = extra_args.iter().map(String::as_str);
+    while let Some(a) = iter.next() {
+        if let Some(v) = a.strip_prefix("--output-format=") {
+            return Some(v);
+        }
+        if a == "--output-format" {
+            return iter.next();
+        }
+    }
+    None
+}
+
+/// Atlas `--output-format json` is one JSON object with top-level `text`.
+/// `plain` / Cursor `text` / mock stdout are raw reply text.
+fn reply_is_json_document(extra_args: &[String]) -> bool {
+    matches!(output_format_value(extra_args), Some("json"))
+}
 
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
@@ -68,15 +174,17 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn default_extra_args(stream: bool) -> Vec<String> {
-    if stream {
-        vec![
+fn default_extra_args(dialect: CliDialect, stream: bool) -> Vec<String> {
+    match (dialect, stream) {
+        (CliDialect::Atlas, false) => vec!["--output-format".into(), "json".into()],
+        // Atlas rejects `text` / `stream-json` and `--stream-partial-output`.
+        (CliDialect::Atlas, true) => vec!["--output-format".into(), "streaming-json".into()],
+        (CliDialect::Cursor, false) => vec!["--output-format".into(), "text".into()],
+        (CliDialect::Cursor, true) => vec![
             "--output-format".into(),
             "stream-json".into(),
             "--stream-partial-output".into(),
-        ]
-    } else {
-        vec!["--output-format".into(), "text".into()]
+        ],
     }
 }
 
@@ -88,8 +196,11 @@ struct Inner {
     next_agent_n: u64,
 }
 
+#[derive(Debug)]
 enum StreamLineKind {
     Final(String),
+    /// Atlas `streaming-json` `type=error` (or equivalent). Not a chat reply.
+    CliError(String),
     ToolStarted {
         tool: String,
         summary: String,
@@ -116,6 +227,7 @@ struct Shared {
     pending: RwLock<HashMap<String, Arc<PendingTurn>>>,
     turn_tx: tokio::sync::broadcast::Sender<RuntimeHint>,
     cli_path: PathBuf,
+    dialect: CliDialect,
     extra_args: Vec<String>,
     timeout: Option<Duration>,
     /// CS1: line-parse stdout for mid-turn hints.
@@ -142,10 +254,11 @@ impl CliAgentGateway {
             .unwrap_or_else(|_| DEFAULT_CLI.to_string())
             .into();
         let stream = env_truthy(ENV_AGENT_CLI_STREAM);
-        let extra_args = std::env::var(ENV_AGENT_CLI_ARGS)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-            .unwrap_or_else(|| default_extra_args(stream));
+        let plan = resolve_spawn_plan(
+            std::env::var(ENV_AGENT_CLI_DIALECT).ok().as_deref(),
+            stream,
+            std::env::var(ENV_AGENT_CLI_ARGS).ok().as_deref(),
+        );
         let timeout = std::env::var(ENV_AGENT_CLI_TIMEOUT_MS)
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -162,9 +275,10 @@ impl CliAgentGateway {
         let approval_mode = ToolApprovalMode::from_env_product_default();
         Self::new_full(
             cli_path,
-            extra_args,
+            plan.dialect,
+            plan.extra_args,
             timeout,
-            stream,
+            plan.stream,
             event_url,
             event_token,
             approval_mode,
@@ -176,6 +290,7 @@ impl CliAgentGateway {
     pub fn new(cli_path: PathBuf, extra_args: Vec<String>, timeout: Option<Duration>) -> Self {
         Self::new_full(
             cli_path,
+            CliDialect::Atlas,
             extra_args,
             timeout,
             false,
@@ -192,12 +307,13 @@ impl CliAgentGateway {
         timeout: Option<Duration>,
     ) -> Self {
         let args = if extra_args.is_empty() {
-            default_extra_args(true)
+            default_extra_args(CliDialect::Atlas, true)
         } else {
             extra_args
         };
         Self::new_full(
             cli_path,
+            CliDialect::Atlas,
             args,
             timeout,
             true,
@@ -217,12 +333,13 @@ impl CliAgentGateway {
         event_token: Option<String>,
     ) -> Self {
         let args = if extra_args.is_empty() {
-            default_extra_args(stream)
+            default_extra_args(CliDialect::Atlas, stream)
         } else {
             extra_args
         };
         Self::new_full(
             cli_path,
+            CliDialect::Atlas,
             args,
             timeout,
             stream,
@@ -241,15 +358,25 @@ impl CliAgentGateway {
         approval_mode: ToolApprovalMode,
     ) -> Self {
         let args = if extra_args.is_empty() {
-            default_extra_args(stream)
+            default_extra_args(CliDialect::Atlas, stream)
         } else {
             extra_args
         };
-        Self::new_full(cli_path, args, timeout, stream, None, None, approval_mode)
+        Self::new_full(
+            cli_path,
+            CliDialect::Atlas,
+            args,
+            timeout,
+            stream,
+            None,
+            None,
+            approval_mode,
+        )
     }
 
     fn new_full(
         cli_path: PathBuf,
+        dialect: CliDialect,
         extra_args: Vec<String>,
         timeout: Option<Duration>,
         stream_enabled: bool,
@@ -295,6 +422,7 @@ impl CliAgentGateway {
                 pending: RwLock::new(HashMap::new()),
                 turn_tx,
                 cli_path,
+                dialect,
                 extra_args,
                 timeout,
                 stream_enabled,
@@ -388,11 +516,7 @@ impl CliAgentGateway {
 
     pub async fn snapshot_transcript(&self, agent_id: &str) -> Vec<TranscriptEntry> {
         let guard = self.shared.inner.read().await;
-        guard
-            .transcripts
-            .get(agent_id)
-            .cloned()
-            .unwrap_or_default()
+        guard.transcripts.get(agent_id).cloned().unwrap_or_default()
     }
 
     pub async fn snapshot_agents(&self) -> Vec<AgentRecord> {
@@ -493,7 +617,10 @@ impl CliAgentGateway {
     async fn append_system_notice(&self, agent_id: &str, text: &str) {
         let mut guard = self.shared.inner.write().await;
         let seq = {
-            let n = guard.next_entry_seq.entry(agent_id.to_string()).or_insert(1);
+            let n = guard
+                .next_entry_seq
+                .entry(agent_id.to_string())
+                .or_insert(1);
             let s = *n;
             *n += 1;
             s
@@ -522,7 +649,10 @@ impl CliAgentGateway {
             return Err(GatewayError::AgentNotFound(agent_id.to_string()));
         }
         let seq = {
-            let n = guard.next_entry_seq.entry(agent_id.to_string()).or_insert(1);
+            let n = guard
+                .next_entry_seq
+                .entry(agent_id.to_string())
+                .or_insert(1);
             let s = *n;
             *n += 1;
             s
@@ -617,14 +747,24 @@ impl CliAgentGateway {
     }
 
     /// Apply one stdout line while streaming (no gate). Returns Some(final) when `result` seen.
-    fn handle_stream_line(&self, agent_id: &str, line: &str, deltas: &mut Vec<String>) -> Option<String> {
+    fn handle_stream_line(
+        &self,
+        agent_id: &str,
+        line: &str,
+        deltas: &mut Vec<String>,
+    ) -> Option<String> {
         match self.classify_stream_line(agent_id, line, deltas) {
             StreamLineKind::Final(s) => Some(s),
+            StreamLineKind::CliError(_) => None,
             StreamLineKind::ToolStarted { tool, summary, .. } => {
                 self.emit_tool(agent_id, &tool, &summary, None);
                 None
             }
-            StreamLineKind::ToolObserved { tool, summary, exit_code } => {
+            StreamLineKind::ToolObserved {
+                tool,
+                summary,
+                exit_code,
+            } => {
                 self.emit_tool(agent_id, &tool, &summary, exit_code);
                 None
             }
@@ -687,51 +827,28 @@ impl CliAgentGateway {
                 }
                 StreamLineKind::Other
             }
-            "tool_call" => {
-                let status = v
-                    .get("status")
-                    .or_else(|| v.get("subtype"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let tool = v
-                    .get("name")
-                    .or_else(|| v.get("tool"))
-                    .or_else(|| v.pointer("/tool_call/name"))
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("tool_call")
-                    .to_string();
-                let summary = v
-                    .get("summary")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or(status.as_str())
-                    .to_string();
-                let exit_code = v.get("exit_code").and_then(|c| c.as_i64()).map(|c| c as i32);
-                let class = classify_cli_tool(&tool, &summary, &status);
-                match class {
-                    CliToolGateClass::ObserveOnly => StreamLineKind::ToolObserved {
-                        tool,
-                        summary,
-                        exit_code,
-                    },
-                    CliToolGateClass::Exempt | CliToolGateClass::Gated => {
-                        // Exempt vs gated decided later; both emit as started-ish when not completed.
-                        if status.eq_ignore_ascii_case("completed") {
-                            StreamLineKind::ToolObserved {
-                                tool,
-                                summary,
-                                exit_code,
-                            }
-                        } else {
-                            StreamLineKind::ToolStarted {
-                                tool,
-                                summary,
-                                status,
-                            }
-                        }
-                    }
+            // Atlas streaming-json: one text chunk per line (`data`), not Cursor `assistant`.
+            "text" => {
+                if let Some(t) = v
+                    .get("data")
+                    .and_then(|d| d.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    self.emit_delta(agent_id, t);
+                    deltas.push(t.to_string());
                 }
+                StreamLineKind::Other
             }
+            "tool_call" => classify_tool_call_line(&v),
+            // Progress/completion. The matching `tool_call` already gated; do not hang again.
+            "tool_call_update" => StreamLineKind::ToolObserved {
+                tool: cli_stream_tool_name(&v),
+                summary: cli_stream_summary(&v, cli_stream_status(&v).as_str()),
+                exit_code: v
+                    .get("exit_code")
+                    .and_then(|c| c.as_i64())
+                    .map(|c| c as i32),
+            },
             "result" => {
                 if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
                     StreamLineKind::Final(r.to_string())
@@ -739,6 +856,16 @@ impl CliAgentGateway {
                     StreamLineKind::Other
                 }
             }
+            "error" => {
+                let msg = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("CLI stream error");
+                StreamLineKind::CliError(msg.to_string())
+            }
+            // `end` is the Atlas streaming-json trailer. Reply text is the joined `text` chunks.
+            "end" => StreamLineKind::Other,
             _ => StreamLineKind::Other,
         }
     }
@@ -822,13 +949,12 @@ impl CliAgentGateway {
         kill_rx: oneshot::Receiver<()>,
         pending: Arc<PendingTurn>,
     ) -> Result<String, GatewayError> {
+        let argv = build_cli_argv(self.shared.dialect, &self.shared.extra_args, prompt);
         let mut cmd = Command::new(&self.shared.cli_path);
-        cmd.arg("-p");
-        for a in &self.shared.extra_args {
+        for a in &argv {
             cmd.arg(a);
         }
-        cmd.arg(prompt)
-            .env("ATLAS_AGENT_ID", agent_id)
+        cmd.env("ATLAS_AGENT_ID", agent_id)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -837,6 +963,8 @@ impl CliAgentGateway {
         info!(
             cli = %self.shared.cli_path.display(),
             %agent_id,
+            dialect = self.shared.dialect.as_str(),
+            extra = %self.shared.extra_args.join(" "),
             stream = self.shared.stream_enabled,
             approval = self.shared.approval.mode.as_str(),
             "spawning agent CLI"
@@ -873,13 +1001,31 @@ impl CliAgentGateway {
 
         let timeout = self.shared.timeout;
         let stream = self.shared.stream_enabled;
+        let json_doc = reply_is_json_document(&self.shared.extra_args);
 
         let text = if stream {
-            self.run_cli_streaming(agent_id, prompt, &mut child, stdout, kill_rx, pending.clone(), timeout)
-                .await?
+            self.run_cli_streaming(
+                agent_id,
+                prompt,
+                &mut child,
+                stdout,
+                kill_rx,
+                pending.clone(),
+                timeout,
+            )
+            .await?
         } else {
-            self.run_cli_text(agent_id, prompt, &mut child, stdout, kill_rx, pending.clone(), timeout)
-                .await?
+            self.run_cli_text(
+                agent_id,
+                prompt,
+                &mut child,
+                stdout,
+                kill_rx,
+                pending.clone(),
+                timeout,
+                json_doc,
+            )
+            .await?
         };
 
         pending.pid.store(0, Ordering::SeqCst);
@@ -911,6 +1057,7 @@ impl CliAgentGateway {
         kill_rx: oneshot::Receiver<()>,
         pending: Arc<PendingTurn>,
         timeout: Option<Duration>,
+        json_doc: bool,
     ) -> Result<String, GatewayError> {
         // CG1: text mode cannot gate mid-turn tools (no tool_call visibility).
         let stdout_task = tokio::spawn(async move {
@@ -953,15 +1100,16 @@ impl CliAgentGateway {
         let out_buf = stdout_task
             .await
             .map_err(|e| GatewayError::Upstream(format!("stdout join: {e}")))?;
-        let text = String::from_utf8_lossy(&out_buf).trim().to_string();
+        let raw = String::from_utf8_lossy(&out_buf).to_string();
         if !status.success() {
+            let detail = humanize_cli_failure_body(&raw);
             return Err(GatewayError::Upstream(format!(
-                "CLI non-zero exit {}: {text}",
+                "CLI non-zero exit {}: {detail}",
                 status.code().unwrap_or(-1)
             )));
         }
         let _ = prompt;
-        Ok(text)
+        extract_text_mode_reply(&raw, json_doc)
     }
 
     async fn run_cli_streaming(
@@ -977,6 +1125,7 @@ impl CliAgentGateway {
         let mut reader = BufReader::new(stdout);
         let mut deltas: Vec<String> = Vec::new();
         let mut final_from_result: Option<String> = None;
+        let mut cli_error: Option<String> = None;
         let mut plain = String::new();
         let mut line = String::new();
         // Deny/timeout returns early with closed-set preview (no deferred reason).
@@ -1036,10 +1185,21 @@ impl CliAgentGateway {
                 StreamLineKind::Final(fin) => {
                     final_from_result = Some(fin);
                 }
-                StreamLineKind::ToolObserved { tool, summary, exit_code } => {
+                StreamLineKind::CliError(msg) => {
+                    cli_error = Some(msg);
+                }
+                StreamLineKind::ToolObserved {
+                    tool,
+                    summary,
+                    exit_code,
+                } => {
                     self.emit_tool(agent_id, &tool, &summary, exit_code);
                 }
-                StreamLineKind::ToolStarted { tool, summary, status: _ } => {
+                StreamLineKind::ToolStarted {
+                    tool,
+                    summary,
+                    status: _,
+                } => {
                     let class = classify_cli_tool(&tool, &summary, "started");
                     match class {
                         CliToolGateClass::Exempt | CliToolGateClass::ObserveOnly => {
@@ -1110,9 +1270,26 @@ impl CliAgentGateway {
         };
 
         if !status.success() {
+            let detail = cli_error
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| final_from_result.clone().filter(|s| !s.trim().is_empty()))
+                .unwrap_or_else(|| deltas.join(""));
+            let detail = detail.trim();
+            let code = status.code().unwrap_or(-1);
+            return Err(if detail.is_empty() {
+                GatewayError::Upstream(format!("CLI non-zero exit {code}"))
+            } else {
+                GatewayError::Upstream(format!(
+                    "CLI non-zero exit {code}: {}",
+                    truncate_hint(detail)
+                ))
+            });
+        }
+        if let Some(msg) = cli_error.filter(|s| !s.trim().is_empty()) {
             return Err(GatewayError::Upstream(format!(
-                "CLI non-zero exit {}",
-                status.code().unwrap_or(-1)
+                "CLI JSON error: {}",
+                truncate_hint(msg.trim())
             )));
         }
 
@@ -1239,11 +1416,7 @@ impl CliAgentGateway {
         if !guard.agents.contains_key(agent_id) {
             return Err(GatewayError::AgentNotFound(agent_id.to_string()));
         }
-        let entries = guard
-            .transcripts
-            .get(agent_id)
-            .cloned()
-            .unwrap_or_default();
+        let entries = guard.transcripts.get(agent_id).cloned().unwrap_or_default();
         let filtered: Vec<_> = entries
             .into_iter()
             .filter(|e| before_seq.map(|b| e.seq < b).unwrap_or(true))
@@ -1256,7 +1429,12 @@ impl CliAgentGateway {
         }))
     }
 
-    async fn dispatch(&self, agent_id: &str, name: &str, args: Value) -> Result<Value, GatewayError> {
+    async fn dispatch(
+        &self,
+        agent_id: &str,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, GatewayError> {
         match name {
             "listAgents" => self.list_agents().await,
             "createAgent" => self.create_agent(&args).await,
@@ -1280,11 +1458,7 @@ impl Gateway for CliAgentGateway {
         self.shared.invokes.load(Ordering::SeqCst)
     }
 
-    async fn tool_approve(
-        &self,
-        approval_id: &str,
-        decision: &str,
-    ) -> Result<Value, GatewayError> {
+    async fn tool_approve(&self, approval_id: &str, decision: &str) -> Result<Value, GatewayError> {
         let Some(d) = ApprovalDecision::parse(decision) else {
             return Err(GatewayError::InvalidArgs(
                 "decision must be allow|deny".into(),
@@ -1311,17 +1485,89 @@ impl Gateway for Arc<CliAgentGateway> {
         (**self).invoke_count()
     }
 
-    async fn tool_approve(
-        &self,
-        approval_id: &str,
-        decision: &str,
-    ) -> Result<Value, GatewayError> {
+    async fn tool_approve(&self, approval_id: &str, decision: &str) -> Result<Value, GatewayError> {
         (**self).tool_approve(approval_id, decision).await
     }
 
     fn tool_approval_info(&self) -> Option<(String, bool)> {
         (**self).tool_approval_info()
     }
+}
+
+/// Text-mode stdout. JSON mode reads one Atlas object `{text, stopReason, sessionId}`.
+/// Plain text, mock-cli, and NDJSON (more than one JSON value) pass through unchanged
+/// so CI mock stays a reply instead of a parse error.
+fn extract_text_mode_reply(raw: &str, json_mode: bool) -> Result<String, GatewayError> {
+    let trimmed = raw.trim();
+    if !json_mode || trimmed.is_empty() || !trimmed.starts_with('{') {
+        return Ok(trimmed.to_string());
+    }
+    // One value only. Trailing NDJSON lines fail from_str; do not parse the first line.
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return Ok(trimmed.to_string());
+    };
+    let Some(obj) = value.as_object() else {
+        return Err(GatewayError::Upstream(
+            "CLI JSON reply was not an object".into(),
+        ));
+    };
+    if obj.get("type").and_then(|t| t.as_str()) == Some("error") {
+        let msg = obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("CLI JSON error");
+        return Err(GatewayError::Upstream(format!("CLI JSON error: {msg}")));
+    }
+    if let Some(text) = obj.get("text").and_then(|t| t.as_str()) {
+        let text = text.trim();
+        if text.is_empty() {
+            if let Some(reason) = obj.get("stopReason").and_then(|s| s.as_str()) {
+                let reason = reason.trim();
+                if !reason.is_empty() && !reason.eq_ignore_ascii_case("end_turn") {
+                    return Err(GatewayError::Upstream(format!(
+                        "CLI JSON reply empty (stopReason={reason})"
+                    )));
+                }
+            }
+        }
+        return Ok(text.to_string());
+    }
+    if obj.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+        let msg = obj
+            .get("message")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("is_error");
+        return Err(GatewayError::Upstream(format!("CLI JSON error: {msg}")));
+    }
+    Err(GatewayError::Upstream(
+        "CLI JSON reply missing text field".into(),
+    ))
+}
+
+fn humanize_cli_failure_body(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(msg) = v
+            .get("message")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return msg.to_string();
+        }
+        if let Some(err) = v
+            .get("error")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return err.to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn truncate_hint(s: &str) -> String {
@@ -1350,6 +1596,56 @@ fn is_assistant_partial(v: &Value) -> bool {
     !has_model
 }
 
+fn classify_tool_call_line(v: &Value) -> StreamLineKind {
+    let status = cli_stream_status(v);
+    let tool = cli_stream_tool_name(v);
+    let summary = cli_stream_summary(v, &status);
+    let exit_code = v
+        .get("exit_code")
+        .and_then(|c| c.as_i64())
+        .map(|c| c as i32);
+    // `completed` is observe-only. Atlas `in_progress` and Cursor `started` both gate later.
+    if status.eq_ignore_ascii_case("completed") {
+        StreamLineKind::ToolObserved {
+            tool,
+            summary,
+            exit_code,
+        }
+    } else {
+        StreamLineKind::ToolStarted {
+            tool,
+            summary,
+            status,
+        }
+    }
+}
+
+fn cli_stream_tool_name(v: &Value) -> String {
+    v.get("name")
+        .or_else(|| v.get("toolName"))
+        .or_else(|| v.get("tool"))
+        .or_else(|| v.pointer("/tool_call/name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("tool_call")
+        .to_string()
+}
+
+fn cli_stream_status(v: &Value) -> String {
+    v.get("status")
+        .or_else(|| v.get("subtype"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn cli_stream_summary(v: &Value, status: &str) -> String {
+    v.get("summary")
+        .and_then(|s| s.as_str())
+        .or_else(|| v.get("title").and_then(|s| s.as_str()))
+        .unwrap_or(status)
+        .to_string()
+}
+
 fn extract_assistant_text(v: &Value) -> Option<String> {
     if let Some(arr) = v.pointer("/message/content").and_then(|c| c.as_array()) {
         let mut out = String::new();
@@ -1368,4 +1664,292 @@ fn extract_assistant_text(v: &Value) -> Option<String> {
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Gateway, DEFAULT_AGENT_ID};
+    use serde_json::json;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn atlas_text_argv_is_format_then_single_prompt() {
+        let plan = resolve_spawn_plan(None, false, None);
+        assert_eq!(plan.dialect, CliDialect::Atlas);
+        assert!(!plan.stream);
+        assert_eq!(plan.extra_args, args(&["--output-format", "json"]));
+        assert_eq!(
+            build_cli_argv(plan.dialect, &plan.extra_args, "hello U1"),
+            args(&["--output-format", "json", "-p", "hello U1"])
+        );
+    }
+
+    #[test]
+    fn atlas_stream_argv_uses_streaming_json_without_partial_flag() {
+        let plan = resolve_spawn_plan(Some("atlas"), true, None);
+        assert_eq!(
+            plan.extra_args,
+            args(&["--output-format", "streaming-json"])
+        );
+        assert!(!plan
+            .extra_args
+            .iter()
+            .any(|a| a == "--stream-partial-output"));
+        assert_eq!(
+            build_cli_argv(plan.dialect, &plan.extra_args, "hello U1"),
+            args(&["--output-format", "streaming-json", "-p", "hello U1"])
+        );
+    }
+
+    #[test]
+    fn cursor_dialect_keeps_legacy_text_and_stream_json_argv() {
+        let text = resolve_spawn_plan(Some("cursor"), false, None);
+        assert_eq!(text.dialect, CliDialect::Cursor);
+        assert_eq!(text.extra_args, args(&["--output-format", "text"]));
+        assert_eq!(
+            build_cli_argv(text.dialect, &text.extra_args, "hello U1"),
+            args(&["-p", "--output-format", "text", "hello U1"])
+        );
+
+        let stream = resolve_spawn_plan(Some("legacy"), true, None);
+        assert_eq!(stream.dialect, CliDialect::Cursor);
+        assert_eq!(
+            stream.extra_args,
+            args(&["--output-format", "stream-json", "--stream-partial-output"])
+        );
+        assert_eq!(
+            build_cli_argv(stream.dialect, &stream.extra_args, "hello U1"),
+            args(&[
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--stream-partial-output",
+                "hello U1"
+            ])
+        );
+    }
+
+    #[test]
+    fn extra_args_override_keeps_dialect_argv_order() {
+        let plain = resolve_spawn_plan(None, false, Some(r#"["--output-format","plain"]"#));
+        assert_eq!(plain.extra_args, args(&["--output-format", "plain"]));
+        assert_eq!(
+            build_cli_argv(plain.dialect, &plain.extra_args, "hi"),
+            args(&["--output-format", "plain", "-p", "hi"])
+        );
+
+        let cursor = resolve_spawn_plan(
+            Some("cursor"),
+            true,
+            Some(r#"["--output-format","stream-json"]"#),
+        );
+        assert_eq!(
+            build_cli_argv(cursor.dialect, &cursor.extra_args, "hi"),
+            args(&["-p", "--output-format", "stream-json", "hi"])
+        );
+    }
+
+    #[test]
+    fn json_reply_uses_text_field_and_surfaces_errors() {
+        let body = r#"{"text":"hello U1","stopReason":"end_turn","sessionId":"sid"}"#;
+        assert_eq!(extract_text_mode_reply(body, true).unwrap(), "hello U1");
+
+        let err = extract_text_mode_reply(r#"{"type":"error","message":"need login"}"#, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("need login"), "{err}");
+
+        let empty = extract_text_mode_reply(
+            r#"{"text":"","stopReason":"refusal","sessionId":"s"}"#,
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(empty.contains("stopReason=refusal"), "{empty}");
+
+        let missing = extract_text_mode_reply(r#"{"sessionId":"s"}"#, true)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("missing text"), "{missing}");
+
+        // mock-cli ignores --output-format and prints plain text.
+        assert_eq!(
+            extract_text_mode_reply("atlas-mock-reply agent=agt_1 chars=8", true).unwrap(),
+            "atlas-mock-reply agent=agt_1 chars=8"
+        );
+
+        // Cursor text / plain mode must not unwrap a JSON-looking reply.
+        let raw = r#"{"text":"not a wrapper"}"#;
+        assert_eq!(extract_text_mode_reply(raw, false).unwrap(), raw);
+
+        // Text mode + mock NDJSON is not one JSON document; keep the raw reply.
+        let ndjson =
+            "{\"type\":\"assistant\"}\n{\"type\":\"result\",\"result\":\"atlas-mock-reply\"}\n";
+        assert_eq!(
+            extract_text_mode_reply(ndjson, true).unwrap(),
+            ndjson.trim()
+        );
+    }
+
+    #[test]
+    fn failure_body_prefers_json_message() {
+        assert_eq!(
+            humanize_cli_failure_body(r#"{"type":"error","message":"Couldn't start session"}"#),
+            "Couldn't start session"
+        );
+        assert_eq!(
+            humanize_cli_failure_body("plain stderr-ish"),
+            "plain stderr-ish"
+        );
+    }
+
+    #[test]
+    fn streaming_json_text_chunks_and_tool_name() {
+        let gw = CliAgentGateway::new(PathBuf::from("agent"), vec![], None);
+        let mut deltas = Vec::new();
+        let kind =
+            gw.classify_stream_line("agt_1", r#"{"type":"text","data":"hello "}"#, &mut deltas);
+        assert!(matches!(kind, StreamLineKind::Other));
+        let kind = gw.classify_stream_line("agt_1", r#"{"type":"text","data":"U1"}"#, &mut deltas);
+        assert!(matches!(kind, StreamLineKind::Other));
+        assert_eq!(deltas.join(""), "hello U1");
+        let end = gw.classify_stream_line(
+            "agt_1",
+            r#"{"type":"end","stopReason":"end_turn","sessionId":"sid"}"#,
+            &mut deltas,
+        );
+        assert!(matches!(end, StreamLineKind::Other));
+        assert_eq!(deltas.join(""), "hello U1");
+
+        let tool = gw.classify_stream_line(
+            "agt_1",
+            r#"{"type":"tool_call","toolCallId":"c1","toolName":"run_terminal_cmd","status":"in_progress","title":"Run"}"#,
+            &mut deltas,
+        );
+        match tool {
+            StreamLineKind::ToolStarted { tool, status, .. } => {
+                assert_eq!(tool, "run_terminal_cmd");
+                assert_eq!(status, "in_progress");
+            }
+            other => panic!("expected started tool, got {other:?}"),
+        }
+
+        let cursor = gw.classify_stream_line(
+            "agt_1",
+            r#"{"type":"result","subtype":"success","result":"atlas-mock-reply"}"#,
+            &mut deltas,
+        );
+        match cursor {
+            StreamLineKind::Final(s) => assert_eq!(s, "atlas-mock-reply"),
+            other => panic!("expected cursor result, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_atlas_json_argv_parses_text_field() {
+        let dir = std::env::temp_dir().join(format!(
+            "atlas-cli-dialect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-agent.sh");
+        let args_out = dir.join("args.txt");
+        let reply = dir.join("reply.json");
+        std::fs::write(
+            &reply,
+            r#"{"text":"reply-from-text","stopReason":"end_turn","sessionId":"sid"}"#,
+        )
+        .unwrap();
+        write_executable(
+            &script,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat '{}'\n",
+                args_out.display(),
+                reply.display()
+            ),
+        );
+        let gw = CliAgentGateway::new(script, args(&["--output-format", "json"]), None);
+        let v = gw
+            .invoke(
+                DEFAULT_AGENT_ID,
+                "sendPrompt",
+                json!({"prompt": "hello U1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(v["preview"], "reply-from-text");
+        let recorded = std::fs::read_to_string(&args_out).unwrap();
+        assert_eq!(recorded, "--output-format\njson\n-p\nhello U1\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_atlas_json_error_exit_uses_message() {
+        let dir = std::env::temp_dir().join(format!(
+            "atlas-cli-dialect-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-agent.sh");
+        write_executable(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"error\",\"message\":\"need login\"}'\nexit 2\n",
+        );
+        let gw = CliAgentGateway::new(script, args(&["--output-format", "json"]), None);
+        let err = gw
+            .invoke(
+                DEFAULT_AGENT_ID,
+                "sendPrompt",
+                json!({"prompt": "hello U1"}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-zero exit 2"), "{err}");
+        assert!(err.contains("need login"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_cli_plain_reply_survives_atlas_json_argv() {
+        let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/mock-cli/mock-atlas-agent-cli.sh");
+        assert!(cli.exists(), "mock cli missing at {}", cli.display());
+        let gw = CliAgentGateway::new(cli, args(&["--output-format", "json"]), None);
+        let v = gw
+            .invoke(
+                DEFAULT_AGENT_ID,
+                "sendPrompt",
+                json!({"prompt": "hello U1"}),
+            )
+            .await
+            .unwrap();
+        let preview = v["preview"].as_str().unwrap();
+        assert!(preview.contains("atlas-mock-reply"), "{preview}");
+        assert!(!preview.starts_with("echo:"), "{preview}");
+    }
 }
