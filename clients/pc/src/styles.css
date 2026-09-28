@@ -182,7 +182,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   min-height: 260px;
   max-height: min(55vh, 560px);
   overflow: auto;
-  white-space: pre-wrap;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  white-space: normal;
   word-break: break-word;
   background: #0c1118;
   border: 1px solid var(--border);
@@ -190,6 +194,85 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 10px;
   margin-bottom: 10px;
   color: var(--text);
+}
+.conversation-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.bubble {
+  max-width: min(88%, 40rem);
+  border-radius: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: #141c28;
+}
+.bubble-user {
+  align-self: flex-end;
+  background: #1a3354;
+  border-color: #2a4d78;
+}
+.bubble-assistant { align-self: flex-start; }
+.bubble-system {
+  align-self: center;
+  max-width: 100%;
+  background: transparent;
+  border-style: dashed;
+  color: var(--muted);
+}
+.bubble-other { align-self: flex-start; }
+.bubble-pending { opacity: 0.72; }
+.bubble-role {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.bubble-body {
+  font-size: 0.92rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0.4em 0; }
+.md ul, .md ol { margin: 0.35em 0; padding-left: 1.25em; }
+.md li { margin: 0.15em 0; }
+.md a { color: var(--accent); }
+.md strong { font-weight: 700; }
+.md em { font-style: italic; }
+.md h1, .md h2, .md h3, .md h4 {
+  margin: 0.45em 0 0.2em;
+  color: var(--text);
+  font-weight: 700;
+  line-height: 1.3;
+}
+.md h1 { font-size: 1.15em; }
+.md h2 { font-size: 1.05em; }
+.md h3, .md h4 { font-size: 1em; }
+.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86em;
+  background: #0c1118;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.md pre {
+  margin: 0.4em 0;
+  padding: 8px 10px;
+  overflow: auto;
+  background: #0c1118;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+}
+.md pre code { background: transparent; padding: 0; }
+.md blockquote {
+  margin: 0.4em 0;
+  padding-left: 0.7em;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
 }
 .composer-actions {
   display: flex;

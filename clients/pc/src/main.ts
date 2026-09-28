@@ -31,6 +31,13 @@ import {
   type PcMode,
   type RouteDecision,
 } from "./pcMode";
+import {
+  applyOptimisticUsers,
+  parseTranscriptMessages,
+  snapshotUserContent,
+  type PendingUserSend,
+} from "./chatMessages";
+import { renderChatMarkdown } from "./chatMarkdown";
 
 const app = document.querySelector("#app")!;
 
@@ -195,7 +202,7 @@ app.innerHTML = `
 
     <section class="chat-pane panel">
       <h2>Conversation</h2>
-      <div id="conversation" class="conversation mono" aria-live="polite"></div>
+      <div id="conversation" class="conversation" aria-live="polite"></div>
       <div id="approvalCard" class="approval-card" hidden></div>
       <div class="composer">
         <textarea id="prompt" placeholder="Write a prompt…" rows="3">hello U1</textarea>
@@ -448,6 +455,8 @@ let offboxNextCursor: string | null | undefined = undefined;
 let lastRoster: RosterEntry[] = [];
 let lastUploadId: string | null = null;
 let lastTailRaw: unknown = null;
+let pendingSends: Array<PendingUserSend & { agentId: string }> = [];
+let pendingSeq = 0;
 
 /** PC-side soft cap — far below gateway 3 MiB args JSON limit. */
 const UI_UPLOAD_MAX_BYTES = Math.floor(1.5 * 1024 * 1024);
@@ -844,44 +853,94 @@ function selectedMemberIds(): string[] {
   return [...groupMembersEl.selectedOptions].map((o) => o.value);
 }
 
-function formatEventLine(e: BotEventEnvelope): string {
-  const body =
-    typeof e.event === "object" && e.event !== null
-      ? JSON.stringify(e.event)
-      : String(e.event ?? "");
-  return `▸ #${e.seq} ${e.channel} ${body}`;
+function roleLabel(role: string): string {
+  switch (role) {
+    case "user":
+      return "You";
+    case "assistant":
+      return "Assistant";
+    case "system":
+      return "System";
+    default:
+      return role;
+  }
 }
 
+function bubbleKind(role: string): string {
+  if (role === "user" || role === "assistant" || role === "system") return role;
+  return "other";
+}
+
+/**
+ * Chat and Debug share this pane: transcript bubbles only.
+ * `hub:*` lines stay in the debug Events pane (`renderEvents`).
+ */
 function renderConversation() {
   const aid = currentAgentId();
-  const parts: string[] = [];
+  const mine = pendingSends
+    .filter((p) => p.agentId === aid)
+    .map(({ localId, content, seenIds, unidentifiedCount }) => ({
+      localId,
+      content,
+      seenIds,
+      unidentifiedCount,
+    }));
+  const { messages, remaining } = applyOptimisticUsers(
+    parseTranscriptMessages(lastTailRaw),
+    mine,
+  );
+  pendingSends = [
+    ...pendingSends.filter((p) => p.agentId !== aid),
+    ...remaining.map((p) => ({ ...p, agentId: aid })),
+  ];
 
-  if (lastTailRaw != null) {
-    parts.push("—— transcript ——");
-    try {
-      parts.push(
-        typeof lastTailRaw === "string"
-          ? lastTailRaw
-          : JSON.stringify(lastTailRaw, null, 2),
-      );
-    } catch {
-      parts.push(String(lastTailRaw));
-    }
-  }
-
-  const sorted = sortEventsBySeq(events.filter((e) => e.agentId === aid));
-  if (sorted.length) {
-    parts.push("—— live events ——");
-    for (const e of sorted) parts.push(formatEventLine(e));
-  }
-
-  if (!parts.length) {
-    conversationEl.textContent =
-      "Connect → pick agent → Send. Live events and transcript appear here.";
+  conversationEl.replaceChildren();
+  if (!messages.length) {
+    const empty = document.createElement("p");
+    empty.className = "conversation-empty";
+    empty.textContent = "Connect → pick agent → Send. Messages appear here.";
+    conversationEl.append(empty);
     return;
   }
-  conversationEl.textContent = parts.join("\n");
+
+  for (const m of messages) {
+    const bubble = document.createElement("article");
+    bubble.className = `bubble bubble-${bubbleKind(m.role)}`;
+    bubble.dataset.role = m.role;
+    if (m.pending) bubble.classList.add("bubble-pending");
+    const role = document.createElement("div");
+    role.className = "bubble-role";
+    role.textContent = roleLabel(m.role);
+    const body = document.createElement("div");
+    body.className = "bubble-body md";
+    try {
+      body.innerHTML = renderChatMarkdown(m.content);
+    } catch {
+      body.textContent = m.content;
+    }
+    bubble.append(role, body);
+    conversationEl.append(bubble);
+  }
   conversationEl.scrollTop = conversationEl.scrollHeight;
+}
+
+function rememberUserSend(agentId: string, content: string): string {
+  const snap = snapshotUserContent(parseTranscriptMessages(lastTailRaw), content);
+  const localId = `local-${++pendingSeq}`;
+  pendingSends.push({
+    agentId,
+    localId,
+    content,
+    seenIds: snap.seenIds,
+    unidentifiedCount: snap.unidentifiedCount,
+  });
+  renderConversation();
+  return localId;
+}
+
+function dropPending(localId: string) {
+  pendingSends = pendingSends.filter((p) => p.localId !== localId);
+  renderConversation();
 }
 
 function renderEvents() {
@@ -1177,6 +1236,7 @@ $("btnConnect").onclick = async () => {
   clearFail();
   events.length = 0;
   lastTailRaw = null;
+  pendingSends = [];
   renderEvents();
   const pasted = tokenPaste.value.trim() || sessionToken;
   if (pasted) sessionToken = pasted;
@@ -1357,8 +1417,10 @@ $("btnLogout").onclick = () => {
 $("btnDisconnect").onclick = () => {
   client?.disconnect();
   client = null;
+  pendingSends = [];
   capsEl.textContent = "capabilities: —";
   connMetaEl.textContent = "connection_id: —";
+  renderConversation();
 };
 
 $("btnStatus").onclick = async () => {
@@ -1489,16 +1551,18 @@ $("btnChannelRefresh").onclick = async () => {
 
 $("btnSend").onclick = async () => {
   clearFail();
+  const aid = currentAgentId();
+  const text = promptEl.value;
+  const localId = rememberUserSend(aid, text);
   try {
-    const aid = currentAgentId();
     await ensureSubscribed(aid);
-    const text = promptEl.value;
     const r = await ensureClient().sendPrompt(aid, text, {
       immediate: immediateEl.checked,
     });
     appendLog("info", "sendPrompt result", r);
     void refreshTail();
   } catch (e) {
+    dropPending(localId);
     showFail(e as DisplayError);
   }
 };

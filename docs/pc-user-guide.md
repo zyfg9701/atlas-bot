@@ -38,7 +38,7 @@ Chat **不出现**：「更多 / 调试」手风琴、Raw Log、协议细按钮�
 | 顶栏连接态 + Connect/Disconnect | `hello` 后 badge → ready |
 | 顶栏「调试」「入口」 | 去 `#/debug`，或清除 mode 回入口 |
 | Agent 侧栏 | 下拉 + Create agent（G1/C1 仅调试页） |
-| Conversation | 合并展示 transcript tail + 订阅到的 tool/delta 等事件 |
+| Conversation | 只显示 transcript 消息气泡（Markdown）。不拼 `hub:*` / Raw JSON |
 | Composer | Send / Interrupt / immediate |
 | 错误条 | 有 Failure 才显示 |
 
@@ -58,7 +58,7 @@ Chat **不出现**：「更多 / 调试」手风琴、Raw Log、协议细按钮�
 
 手风琴开关仍写回 `localStorage atlas-pc-debug`。`?debug=1` 见 §0。
 
-手测清单见 `docs/pc-ui-u2-checklist.md`（U1 对照：`docs/pc-ui-u1-checklist.md`）。
+手测清单见 `docs/pc-ui-u2-checklist.md`（U1 对照：`docs/pc-ui-u1-checklist.md`；对话气泡：`docs/pc-ui-u3-checklist.md`）。
 
 ---
 
@@ -118,7 +118,7 @@ cd clients/pc && npm i && npm run tauri dev
 | Bearer / Login (OIDC PKCE) | 仅调试页（高级 Hub + Login）；生产靠 Tauri `connect_ws` |
 | Cold status/roster/offbox | 调试页 |
 | list / create / **createGroup / setGroupMembers** / **Channels 四命令** / subscribe / send / interrupt / tail | Chat：自动 list + 侧栏 Create agent + Send；G1/C1 与协议细按钮在调试页 |
-| Events / transcript | Chat 合并流；调试页保留原面板 |
+| Events / transcript | 两页 Conversation 都是气泡；`hub:*` 只在调试页 Events / Hot transcript / Log |
 | VNC / upload / attach | composer 图标（两页）+ 调试页完整控件 |
 | Failure / Log | 错误条 + 调试页 Log |
 
@@ -173,7 +173,7 @@ cd clients/pc && npm i && npm run tauri dev
 - **Chat 上没有的东西：** 高级 Hub、Login、G1 Create group、C1 Channels、调试手风琴 / Raw Log / 协议细按钮。改 Hub 地址或登录走顶栏 **调试**。📎 / 🖥 仍留在 composer。  
 - **`?debug=1` 与 `#/debug`：** 查询参数只在当次加载强制进入调试页并展开手风琴，随后从地址栏删除。之后以 hash 和 `atlas-pc-mode` 为准。`atlas-pc-debug` 只控制手风琴，不决定路由。  
 - **主布局形态：** 顶栏连接 + **侧栏 agent** + 主对话区（非顶栏-only）。调试页是同一套 DOM，不是第二份连接。  
-- **对话流：** **单栏合并**（transcript 段 + live events 段）；调试页仍保留独立 Events / Hot transcript。  
+- **对话流（U3）：** Conversation 只渲染 transcript 气泡（用户 / 助手 / 系统），正文走 Markdown。同一条回复不会再被 `hub:turn_finished` 的 preview 贴第二次。调试页 Events / Hot transcript / Log 仍是原文。见 `docs/pc-ui-u3-checklist.md`。  
 - **浏览器-only vs Tauri：** 路由相同（hash + `localStorage`）。`npm run dev` 的浏览器 WebSocket **不能**设 `Authorization`；`oidc`/`static` Hub 需 Tauri 或 CLI。  
 - Hub / `bot.*` / `hubClient` 协议面 **未改**（纯呈现）。零新 `bot.*`。不是签名/上架，也不是品牌重绘。
 
@@ -181,6 +181,7 @@ cd clients/pc && npm i && npm run tauri dev
 
 ## 7. 相关文档
 
+- U3 手测：`docs/pc-ui-u3-checklist.md`  
 - U2 手测：`docs/pc-ui-u2-checklist.md`  
 - U1 手测：`docs/pc-ui-u1-checklist.md`  
 - G1 群组手测：[`docs/g1-group-handtest.md`](./g1-group-handtest.md)  
