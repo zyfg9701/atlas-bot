@@ -1,34 +1,52 @@
 # atlas-bot PC 使用说明
 
-> 基线：`main`@`d52fa98` + **C1 CLI 主路径** · 客户端 `clients/pc`（Tauri 2 + TS）  
-> Chat 主屏 +「更多/调试」；**推荐后端 = cli gateway**（见 cli-primary-runbook）。不是最终品牌 UI / Box LLM / I2.2。
+> 基线：`main`@`e6f9e66` + **U2 纯 Chat 壳** · 客户端 `clients/pc`（Tauri 2 + TS）  
+> 入口二选一：`#/chat` 对话壳，`#/debug` 保留原调试台。**推荐后端 = cli gateway**（见 cli-primary-runbook）。本阶段是壳分流，不是最终品牌 UI / 签名上架 / Box LLM / I2.2。
 
 ---
 
-## 1. 产品主路径（默认一屏 Chat）
+## 0. 入口、深链、`atlas-pc-mode`
 
-默认进入 Chat 布局，主路径有意义点击 ≤3：
+冷启动（地址没有 `#/chat` / `#/debug`，且 `localStorage atlas-pc-mode` 不是 `chat` 或 `debug`）落在 **入口页**：两个按钮 **Chat** 和 **调试 / Debug**。点选写入 `atlas-pc-mode`，再进入对应 hash。
 
-1. **Connect**（顶栏；Hub 地址默认 `ws://127.0.0.1:7700/ws`，改地址点「高级 · Hub URL / Bearer」）  
+| 规则 | 行为 |
+|------|------|
+| 深链 `#/chat`、`#/debug` | 直接进该页，并**覆盖**已存 `atlas-pc-mode` |
+| 空 hash 或 `#/`，且 mode 有效 | 恢复上次模式，并把 hash 补成 `#/chat` 或 `#/debug` |
+| 空 hash 或 `#/`，mode 缺失或无效 | 入口页 |
+| 顶栏 **入口** | 清除 `atlas-pc-mode`，回到 `#/` |
+| 同一会话 Chat ↔ Debug | **不断开**已连接的 WebSocket（页面内同一个 `HubClient`） |
+
+`?debug=1`：这一次加载进入 `#/debug` 并强制展开调试手风琴，然后从地址栏去掉该参数，避免之后点 Chat 又被弹回。`atlas-pc-debug` **不选页面**，只记住调试页手风琴：`0` 折叠，未设置或 `1` 展开。
+
+浏览器 `npm run dev` 与 Tauri 共用这套 hash；差别仍是浏览器 WebSocket 不能设 `Authorization`。
+
+---
+
+## 1. 产品主路径（`#/chat`）
+
+入口选 Chat（或直接打开 `#/chat`）后，主路径有意义点击 ≤3：
+
+1. **Connect**（顶栏；Hub 地址默认 `ws://127.0.0.1:7700/ws`。改地址、Bearer、Login 在 **调试页** 的「高级 · Hub URL / Bearer」）  
 2. （按需）选 **Agent**；Connect 成功后会自动 `listAgents` 并选中  
 3. 输入 prompt → **Send**（未订阅时自动 `subscribe`；旁路 **Interrupt**）
 
-可选：顶栏 **Login / Logout**（Hub 非 `dev` 时）；composer 旁 📎 上传、🖥 Open desktop（亦在调试区）。
+Chat **不出现**：「更多 / 调试」手风琴、Raw Log、协议细按钮、高级 Hub、顶栏 Login、侧栏 Create group（G1）和 Channels（C1）。顶栏小字 **调试** 进入 `#/debug`。composer 旁 📎 / 🖥 仍在（调试页里也有完整 upload / Open desktop）。
 
 | 主屏元素 | 行为 |
 |----------|------|
 | 顶栏连接态 + Connect/Disconnect | `hello` 后 badge → ready |
-| 高级折叠 | Hub WS、Bearer 粘贴 |
-| Agent 侧栏 | 下拉 + Create agent + **Create group** / Change members（G1） |
+| 顶栏「调试」「入口」 | 去 `#/debug`，或清除 mode 回入口 |
+| Agent 侧栏 | 下拉 + Create agent（G1/C1 仅调试页） |
 | Conversation | 合并展示 transcript tail + 订阅到的 tool/delta 等事件 |
 | Composer | Send / Interrupt / immediate |
 | 错误条 | 有 Failure 才显示 |
 
 ---
 
-## 2. 调试入口在哪
+## 2. 调试页 `#/debug`
 
-页面底部 **「更多 / 调试 ▾」** 手风琴（默认折叠）。展开后可点到全部原调试台能力（**只藏不砍**）：
+入口选调试，或 Chat 顶栏 **调试**，或直接打开 `#/debug`。这是原先整页调试台（**只藏不砍**，没有删入口）：高级 Hub、Login / Logout、侧栏 G1 / C1、页底 **「更多 / 调试 ▾」**。手风琴在调试页**默认展开**（`atlas-pc-debug=0` 时保持折叠）。展开区内：
 
 | 调试区块 | 入口 |
 |----------|------|
@@ -38,9 +56,9 @@
 | Desktop · attachments | Open desktop、uploadAttachment、attachUpload |
 | Raw panes + Log | Events、Hot transcript、完整 Log |
 
-可选：URL `?debug=1` 或 `localStorage.setItem('atlas-pc-debug','1')` → 启动时展开调试面板（面板开关会写回 localStorage）。
+手风琴开关仍写回 `localStorage atlas-pc-debug`。`?debug=1` 见 §0。
 
-手测清单见 `docs/pc-ui-u1-checklist.md`。
+手测清单见 `docs/pc-ui-u2-checklist.md`（U1 对照：`docs/pc-ui-u1-checklist.md`）。
 
 ---
 
@@ -94,15 +112,15 @@ cd clients/pc && npm i && npm run tauri dev
 
 ## 4. 能力对照（仍可用）
 
-| 能力 | 主屏 / 调试 |
+| 能力 | Chat `#/chat` / 调试 `#/debug` |
 |------|-------------|
-| Connect / hello / capabilities | 主屏顶栏；caps 在调试 |
-| Bearer / Login (OIDC PKCE) | 高级 + 顶栏 Login；生产靠 Tauri `connect_ws` |
-| Cold status/roster/offbox | 调试 |
-| list / create / **createGroup / setGroupMembers** / **Channels 四命令** / subscribe / send / interrupt / tail | 主屏自动 + 侧栏群组 + **Channels stub** + 调试细按钮 |
-| Events / transcript | 主屏合并流；调试保留原面板 |
-| VNC / upload / attach | composer 图标 + 调试 |
-| Failure / Log | 错误条 + 调试 Log |
+| Connect / hello / capabilities | 两页顶栏都能 Connect；caps 在调试页 |
+| Bearer / Login (OIDC PKCE) | 仅调试页（高级 Hub + Login）；生产靠 Tauri `connect_ws` |
+| Cold status/roster/offbox | 调试页 |
+| list / create / **createGroup / setGroupMembers** / **Channels 四命令** / subscribe / send / interrupt / tail | Chat：自动 list + 侧栏 Create agent + Send；G1/C1 与协议细按钮在调试页 |
+| Events / transcript | Chat 合并流；调试页保留原面板 |
+| VNC / upload / attach | composer 图标（两页）+ 调试页完整控件 |
+| Failure / Log | 错误条 + 调试页 Log |
 
 **还不是：** 品牌视觉系统、**真连 Slack / 多平台频道**（C1-real / C1-multi 另票）、上架包、强制移动建群/频道 UI、群套群 / fan-out 编排、删群产品化、I2.2 移动取票、React/Vue 重写、GA2/YOLO/desktop 集群、token 钥匙串/加密落盘。
 
@@ -111,7 +129,7 @@ cd clients/pc && npm i && npm run tauri dev
 
 ---
 
-## 4.5 G1 建群三步（PC · Hub-only / stub 或 Box）
+## 4.5 G1 建群三步（PC · `#/debug` 侧栏 · Hub-only / stub 或 Box）
 
 1. **Connect** → 确保已有 ≥1 非群 agent（默认 `agt_1`，或侧栏 Create）。  
 2. 侧栏填 **group name**，在 Members 多选框勾选成员 → **Create group** → 列表出现带 `[group]` 的项并选中。  
@@ -121,7 +139,7 @@ cd clients/pc && npm i && npm run tauri dev
 
 ---
 
-## 4.6 C1 Channels 三步（PC · 本地 Slack stub · 未出网）
+## 4.6 C1 Channels 三步（PC · `#/debug` 侧栏 · 本地 Slack stub · 未出网）
 
 1. **Connect** → 选中任意 agent（含群；默认允许挂频道）。  
 2. 侧栏 **Channels (C1 · local stub)**：可见 `slack` manifest（文案含「local stub / no egress」）→ password 框粘贴 token → **Connect** → connections 显示 `connected`（**非**真连 Slack）。  
@@ -149,18 +167,21 @@ cd clients/pc && npm i && npm run tauri dev
 
 ---
 
-## 6. §7 已知限制（U1）
+## 6. §7 已知限制（U2）
 
-- **主布局形态：** 顶栏连接 + **侧栏 agent** + 主对话区（非顶栏-only）。  
-- **对话流：** **单栏合并**（transcript 段 + live events 段）；调试区仍保留独立 Events / Hot transcript。  
-- **调试展开：** 页底 **手风琴** `<details>`（非抽屉 / 非 `#/debug` 双路由）。  
-- **浏览器-only：** `npm run dev` 可用，但浏览器 WebSocket **不能**设 `Authorization`；`oidc`/`static` Hub 需 Tauri 或 CLI。  
-- Hub / `bot.*` / `hubClient` 协议面 **未改**（纯呈现）。
+- **深链 vs `atlas-pc-mode`：** 显式 `#/chat` / `#/debug` 优先并回写 mode。仅当 hash 为空、`#/` 或无法识别时，才用 mode 恢复。点「入口」会清掉 mode。  
+- **Chat 上没有的东西：** 高级 Hub、Login、G1 Create group、C1 Channels、调试手风琴 / Raw Log / 协议细按钮。改 Hub 地址或登录走顶栏 **调试**。📎 / 🖥 仍留在 composer。  
+- **`?debug=1` 与 `#/debug`：** 查询参数只在当次加载强制进入调试页并展开手风琴，随后从地址栏删除。之后以 hash 和 `atlas-pc-mode` 为准。`atlas-pc-debug` 只控制手风琴，不决定路由。  
+- **主布局形态：** 顶栏连接 + **侧栏 agent** + 主对话区（非顶栏-only）。调试页是同一套 DOM，不是第二份连接。  
+- **对话流：** **单栏合并**（transcript 段 + live events 段）；调试页仍保留独立 Events / Hot transcript。  
+- **浏览器-only vs Tauri：** 路由相同（hash + `localStorage`）。`npm run dev` 的浏览器 WebSocket **不能**设 `Authorization`；`oidc`/`static` Hub 需 Tauri 或 CLI。  
+- Hub / `bot.*` / `hubClient` 协议面 **未改**（纯呈现）。零新 `bot.*`。不是签名/上架，也不是品牌重绘。
 
 ---
 
 ## 7. 相关文档
 
+- U2 手测：`docs/pc-ui-u2-checklist.md`  
 - U1 手测：`docs/pc-ui-u1-checklist.md`  
 - G1 群组手测：[`docs/g1-group-handtest.md`](./g1-group-handtest.md)  
 - C1 频道手测：[`docs/c1-channel-handtest.md`](./c1-channel-handtest.md)  
@@ -171,4 +192,4 @@ cd clients/pc && npm i && npm run tauri dev
 
 ---
 
-**一句话：** 先起 CLI 栈（Unix `./scripts/dev-cli-stack.sh` / Win `.\scripts\dev-cli-stack.ps1`），再 Chat 三步（Connect → 选 agent → Send）；stub/box/openai 是旁路；Cold / VNC / upload 在「更多 / 调试」。
+**一句话：** 先起 CLI 栈（Unix `./scripts/dev-cli-stack.sh` / Win `.\scripts\dev-cli-stack.ps1`），入口选 Chat（或打开 `#/chat`）再三步 Connect → 选 agent → Send；调试能力在 `#/debug`；stub/box/openai 是旁路。
