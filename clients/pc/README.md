@@ -2,8 +2,8 @@
 
 Tauri 2 + TypeScript `bot_client` for Computer Hub Bot-Relay.
 
-**U1 UI：** 默认一屏 **Chat**（Connect / 选 agent / 对话）；Cold path、协议细按钮、VNC、upload、完整 Log 在页底 **「更多 / 调试」**。  
-能力只藏不砍。说明见 [`docs/pc-user-guide.md`](../../docs/pc-user-guide.md)；手测 [`docs/pc-ui-u1-checklist.md`](../../docs/pc-ui-u1-checklist.md)。
+**U2 UI：** 冷启动 **入口** 二选一。`#/chat` 是纯 Chat（Connect / 选 agent / 对话 / Send）。`#/debug` 保留 U1 整页能力（调试手风琴默认展开、高级 Hub、G1/C1、VNC/upload、Raw Log）。同一会话切换 hash **不断开** WebSocket。  
+能力只藏不砍。说明见 [`docs/pc-user-guide.md`](../../docs/pc-user-guide.md)；手测 [`docs/pc-ui-u2-checklist.md`](../../docs/pc-ui-u2-checklist.md)（U1：[`docs/pc-ui-u1-checklist.md`](../../docs/pc-ui-u1-checklist.md)）。
 
 ## Dev
 
@@ -11,9 +11,9 @@ Tauri 2 + TypeScript `bot_client` for Computer Hub Bot-Relay.
 npm i
 npm run tauri dev   # recommended (Bearer on WS via connect_ws)
 npm run dev         # vite only — browser WS cannot set Authorization
-npm run test:unit   # hubClient + authClient
+npm run test:unit   # hubClient + authClient + pcMode
 ```
 
 Hub default: `ws://127.0.0.1:7700/ws` (`ATLAS_AUTH_MODE=dev` = no login).
 
-Debug panel: open「更多 / 调试」, or `?debug=1`, or `localStorage atlas-pc-debug=1`.
+Routes: `#/` gate (unless `localStorage atlas-pc-mode` is `chat` or `debug`), `#/chat`, `#/debug`. Deep link overwrites the stored mode. `?debug=1` opens `#/debug` once and is then removed from the query string. `atlas-pc-debug` only remembers whether the debug accordion is open (`0` closed; missing or `1` open) — it does not choose the page. Chat hides Login / advanced Hub / G1 / C1 / 「更多 / 调试」; use the **调试** link. Browser `npm run dev` and Tauri share this hash shell (browser WS still cannot set `Authorization`).

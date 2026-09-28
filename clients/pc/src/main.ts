@@ -23,35 +23,112 @@ import {
   ticketProviderFromEnv,
   wsToHttpBase,
 } from "./wecomClient";
+import {
+  PC_MODE_STORAGE_KEY,
+  gateChoice,
+  normalizeHashPath,
+  resolvePcRoute,
+  type PcMode,
+  type RouteDecision,
+} from "./pcMode";
 
 const app = document.querySelector("#app")!;
 
-const wantsDebugOpen = (() => {
+function readStorage(key: string): string | null {
   try {
-    if (new URLSearchParams(location.search).get("debug") === "1") return true;
-    if (localStorage.getItem("atlas-pc-debug") === "1") return true;
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
   } catch {
     /* ignore */
   }
-  return false;
-})();
+}
+
+function removeStorage(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** `?debug=1` is honored once per page load, then stripped so later hash changes stay put. */
+let honorDebugQuery = true;
+
+function debugQueryActive(): boolean {
+  if (!honorDebugQuery) return false;
+  try {
+    return new URLSearchParams(location.search).get("debug") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function readRouteInput() {
+  return {
+    hash: location.hash,
+    storedMode: readStorage(PC_MODE_STORAGE_KEY),
+    debugQuery: debugQueryActive(),
+    debugPanelFlag: readStorage("atlas-pc-debug"),
+  };
+}
+
+function stripDebugSearch() {
+  try {
+    const u = new URL(location.href);
+    if (!u.searchParams.has("debug")) return;
+    u.searchParams.delete("debug");
+    const qs = u.searchParams.toString();
+    history.replaceState(null, "", `${u.pathname}${qs ? `?${qs}` : ""}${u.hash}`);
+  } catch {
+    /* ignore — flag already consumed so hash changes will not bounce back */
+  }
+}
+
+// Paint the right shell before injecting markup (same task, no gate flash on deep links).
+{
+  const boot = resolvePcRoute(readRouteInput());
+  document.body.classList.remove("mode-gate", "mode-chat", "mode-debug");
+  document.body.classList.add(`mode-${boot.route}`);
+}
 
 app.innerHTML = `
+  <div id="gate" class="gate">
+    <div class="gate-card panel">
+      <h1>atlas-bot</h1>
+      <p class="hint">选择入口。Chat 只保留对话；调试页保留现有全部能力。</p>
+      <div class="gate-actions">
+        <button id="btnGateChat" type="button">Chat</button>
+        <button id="btnGateDebug" class="secondary" type="button">调试 / Debug</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="shell">
   <header class="topbar">
     <div class="topbar-brand">
       <strong>atlas-bot</strong>
-      <span class="topbar-sub">PC · Chat</span>
+      <span class="topbar-sub" id="topbarSub">PC · Chat</span>
     </div>
     <div class="topbar-actions">
       <span id="state" class="badge disconnected">disconnected</span>
       <button id="btnConnect" type="button">Connect</button>
       <button id="btnDisconnect" class="secondary" type="button">Disconnect</button>
-      <button id="btnLogin" type="button" title="OIDC PKCE or WeCom (ATLAS_TICKET_PROVIDER)">Login</button>
-      <button id="btnLogout" class="secondary" type="button">Logout</button>
+      <button id="btnLogin" class="debug-only" type="button" title="OIDC PKCE or WeCom (ATLAS_TICKET_PROVIDER)">Login</button>
+      <button id="btnLogout" class="secondary debug-only" type="button">Logout</button>
+      <button id="btnGoGate" class="linkish" type="button">入口</button>
+      <a id="linkDebug" class="linkish chat-only" href="#/debug">调试</a>
+      <a id="linkChat" class="linkish debug-only" href="#/chat">Chat</a>
     </div>
   </header>
 
-  <details class="advanced" id="advancedHub">
+  <details class="advanced debug-only" id="advancedHub">
     <summary>高级 · Hub URL / Bearer</summary>
     <div class="row">
       <label for="url">Hub WS</label>
@@ -85,7 +162,7 @@ app.innerHTML = `
         <input id="newName" placeholder="new agent name" value="Scout" />
         <button id="btnCreateMain" type="button">Create</button>
       </div>
-      <div class="group-create">
+      <div class="group-create debug-only">
         <h3 class="subh">Create group (G1)</h3>
         <div class="row">
           <input id="groupName" placeholder="group name" value="Crew" />
@@ -97,7 +174,7 @@ app.innerHTML = `
           <button id="btnSetMembers" class="secondary" type="button" title="Apply selection to current group">Change members</button>
         </div>
       </div>
-            <div class="channels-panel">
+            <div class="channels-panel debug-only">
         <h3 class="subh">Channels (C1 · local stub)</h3>
         <p class="hint mono">本地 stub，未出网 — 非真连 Slack。Token 仅进 gateway 进程内存，reply 不回显；Disconnect 清除。进程重启丢失。</p>
         <div id="channelManifest" class="mono channel-manifest">manifest: —</div>
@@ -112,7 +189,8 @@ app.innerHTML = `
         </div>
         <div id="channelStatus" class="mono channel-status"></div>
       </div>
-      <p class="hint mono">Connect 后自动 listAgents；群显示 [group]。Channels：上方 C1 Slack stub（本地未出网）。</p>
+      <p class="hint mono chat-only">Connect 后自动 listAgents，选中后即可发送。</p>
+      <p class="hint mono debug-only">Connect 后自动 listAgents；群显示 [group]。Channels：上方 C1 Slack stub（本地未出网）。</p>
     </aside>
 
     <section class="chat-pane panel">
@@ -135,7 +213,7 @@ app.innerHTML = `
     </section>
   </main>
 
-  <details class="debug-accordion" id="debugPanel"${wantsDebugOpen ? " open" : ""}>
+  <details class="debug-accordion debug-only" id="debugPanel">
     <summary>更多 / 调试 ▾</summary>
     <div class="debug-body">
       <div class="debug-grid">
@@ -220,10 +298,11 @@ $env:ATLAS_AGENT_CLI="$PWD\tools\mock-cli\mock-atlas-agent-cli.cmd"; .\scripts\d
         </div>
         <h3 class="subh">Log</h3>
         <div id="log" class="mono scrollbox logbox"></div>
-        <p class="hint mono">Tip: <code>?debug=1</code> or localStorage <code>atlas-pc-debug=1</code> opens this panel on load.</p>
+        <p class="hint mono">Tip: 本页是 <code>#/debug</code>。手风琴开合写入 <code>atlas-pc-debug</code>（<code>0</code> 折叠，未设置或 <code>1</code> 展开）。<code>?debug=1</code> 会进入本页并强制展开一次。模式键 <code>atlas-pc-mode</code> = chat | debug。</p>
       </div>
     </div>
   </details>
+  </div>
 `;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -380,6 +459,66 @@ debugPanel.addEventListener("toggle", () => {
     /* ignore */
   }
 });
+
+const topbarSubEl = $("topbarSub");
+
+/**
+ * Presentation only. Must not construct, replace, or disconnect `client`
+ * (one HubClient for the whole page session).
+ */
+function paintRoute(decision: RouteDecision) {
+  document.body.classList.remove("mode-gate", "mode-chat", "mode-debug");
+  document.body.classList.add(`mode-${decision.route}`);
+  document.body.dataset.pcRoute = decision.route;
+  if (decision.route === "debug") {
+    topbarSubEl.textContent = "PC · Debug";
+    document.title = "atlas-bot PC · Debug";
+  } else if (decision.route === "gate") {
+    topbarSubEl.textContent = "PC · Chat";
+    document.title = "atlas-bot PC";
+  } else {
+    topbarSubEl.textContent = "PC · Chat";
+    document.title = "atlas-bot PC · Chat";
+  }
+  if (decision.syncAccordion && debugPanel.open !== decision.debugAccordionOpen) {
+    debugPanel.open = decision.debugAccordionOpen;
+  }
+}
+
+function applyRoute() {
+  const decision = resolvePcRoute(readRouteInput());
+  if (decision.persistMode) writeStorage(PC_MODE_STORAGE_KEY, decision.persistMode);
+  if (decision.consumedDebugQuery) {
+    honorDebugQuery = false;
+    stripDebugSearch();
+  }
+  paintRoute(decision);
+  if (decision.navigateHash != null) {
+    const next = `#${decision.navigateHash.replace(/^#/, "")}`;
+    if (location.hash !== next) location.hash = next;
+  }
+}
+
+function chooseMode(mode: PcMode) {
+  const choice = gateChoice(mode);
+  writeStorage(PC_MODE_STORAGE_KEY, choice.persistMode);
+  if (location.hash !== choice.hash) location.hash = choice.hash;
+  else applyRoute();
+}
+
+$("btnGateChat").onclick = () => chooseMode("chat");
+$("btnGateDebug").onclick = () => chooseMode("debug");
+$("btnGoGate").onclick = () => {
+  removeStorage(PC_MODE_STORAGE_KEY);
+  if (normalizeHashPath(location.hash) === "/") applyRoute();
+  else location.hash = "#/";
+};
+
+window.addEventListener("hashchange", () => {
+  applyRoute();
+});
+
+applyRoute();
 
 const PRIMARY_STACK_CMD = `# Unix
 ATLAS_AGENT_CLI=tools/mock-cli/mock-atlas-agent-cli.sh ./scripts/dev-cli-stack.sh

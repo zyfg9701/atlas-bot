@@ -27,6 +27,62 @@ body {
   gap: 10px;
   min-height: 100vh;
 }
+#shell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* U2: one mounted shell; hash only toggles visibility (HubClient stays). */
+body.mode-gate #shell { display: none; }
+body.mode-chat #gate,
+body.mode-debug #gate { display: none; }
+body.mode-chat #advancedHub,
+body.mode-chat #debugPanel,
+body.mode-chat #btnLogin,
+body.mode-chat #btnLogout,
+body.mode-chat .group-create,
+body.mode-chat .channels-panel,
+body.mode-chat .debug-only {
+  display: none !important;
+}
+body.mode-debug .chat-only { display: none !important; }
+
+.gate {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+.gate-card { max-width: 440px; width: 100%; }
+.gate-card h1 { margin-bottom: 8px; }
+.gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+}
+.gate-actions button { min-width: 140px; padding: 12px 16px; }
+
+button.linkish {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 4px 8px;
+}
+a.linkish {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 4px 8px;
+}
+button.linkish:hover,
+a.linkish:hover { color: var(--text); }
 
 /* —— Top bar —— */
 .topbar {
