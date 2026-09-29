@@ -38,6 +38,20 @@ import {
   type PendingUserSend,
 } from "./chatMessages";
 import { renderChatMarkdown } from "./chatMarkdown";
+import {
+  GW_APPROVE_TOKEN_STORAGE_KEY,
+  GW_HTTP_STORAGE_KEY,
+  approvalCardVisible,
+  approvalFetchInit,
+  approvalQueueView,
+  approvalSettled,
+  decisionLabel,
+  forgetPending,
+  formatApprovalFailure,
+  ingestHubToolPending,
+  resolveGatewayHttpBase,
+  type PendingApproval,
+} from "./toolApproval";
 
 const app = document.querySelector("#app")!;
 
@@ -203,7 +217,7 @@ app.innerHTML = `
     <section class="chat-pane panel">
       <h2>Conversation</h2>
       <div id="conversation" class="conversation" aria-live="polite"></div>
-      <div id="approvalCard" class="approval-card" hidden></div>
+      <div id="approvalCard" class="approval-card" hidden role="region" aria-label="工具审批"></div>
       <div class="composer">
         <textarea id="prompt" placeholder="Write a prompt…" rows="3">hello U1</textarea>
         <div class="composer-actions">
@@ -339,90 +353,145 @@ const approvalCardEl = $("approvalCard") as HTMLDivElement;
 const gwHttpBaseEl = $("gwHttpBase") as HTMLInputElement;
 const gwApproveTokenEl = $("gwApproveToken") as HTMLInputElement;
 
-const DEFAULT_GW_HTTP = "http://127.0.0.1:8787";
-try {
-  gwHttpBaseEl.value = localStorage.getItem("atlas-pc-gw-http") || DEFAULT_GW_HTTP;
-} catch {
-  gwHttpBaseEl.value = DEFAULT_GW_HTTP;
-}
+gwHttpBaseEl.value = resolveGatewayHttpBase(readStorage(GW_HTTP_STORAGE_KEY));
 gwHttpBaseEl.addEventListener("change", () => {
-  try {
-    localStorage.setItem("atlas-pc-gw-http", gwHttpBaseEl.value.trim() || DEFAULT_GW_HTTP);
-  } catch {
-    /* ignore */
-  }
+  const next = resolveGatewayHttpBase(gwHttpBaseEl.value);
+  gwHttpBaseEl.value = next;
+  writeStorage(GW_HTTP_STORAGE_KEY, next);
+});
+gwApproveTokenEl.value = readStorage(GW_APPROVE_TOKEN_STORAGE_KEY) || "";
+gwApproveTokenEl.addEventListener("change", () => {
+  const tok = gwApproveTokenEl.value.trim();
+  gwApproveTokenEl.value = tok;
+  if (tok) writeStorage(GW_APPROVE_TOKEN_STORAGE_KEY, tok);
+  else removeStorage(GW_APPROVE_TOKEN_STORAGE_KEY);
 });
 
-type PendingApproval = { approvalId: string; tool: string; summary: string; agentId: string };
 const pendingApprovals = new Map<string, PendingApproval>();
+const approvalErrors = new Map<string, string>();
+const approvalInFlight = new Set<string>();
 
-function parseApprovalPending(summary: string): { approvalId: string; tool: string } | null {
-  // [approval_pending approvalId=… tool=…] …
-  const m = summary.match(
-    /^\[approval_pending\s+approvalId=([^\s\]]+)\s+tool=([^\]]+)\]/,
-  );
-  if (!m) return null;
-  return { approvalId: m[1], tool: m[2].trim() };
+/** Chat reads the Advanced fields when set, otherwise localStorage / loopback default. */
+function readGwHttpBase(): string {
+  const fromInput = gwHttpBaseEl.value.trim();
+  if (fromInput) return resolveGatewayHttpBase(fromInput);
+  return resolveGatewayHttpBase(readStorage(GW_HTTP_STORAGE_KEY));
+}
+
+function readGwToken(): string {
+  const fromInput = gwApproveTokenEl.value.trim();
+  if (fromInput) return fromInput;
+  return (readStorage(GW_APPROVE_TOKEN_STORAGE_KEY) || "").trim();
 }
 
 function renderApprovalCard() {
-  const aid = currentAgentId();
-  const mine = [...pendingApprovals.values()].filter((p) => p.agentId === aid);
-  if (!mine.length) {
+  const view = approvalQueueView(pendingApprovals, currentAgentId());
+  if (!approvalCardVisible(view)) {
     approvalCardEl.hidden = true;
-    approvalCardEl.innerHTML = "";
+    approvalCardEl.replaceChildren();
     return;
   }
-  const p = mine[mine.length - 1];
   approvalCardEl.hidden = false;
-  approvalCardEl.innerHTML = "";
+  approvalCardEl.replaceChildren();
+
   const title = document.createElement("div");
   title.className = "approval-title";
-  title.textContent = `待审批 · ${p.tool}`;
-  const body = document.createElement("div");
-  body.className = "approval-body mono";
-  body.textContent = p.summary;
-  const actions = document.createElement("div");
-  actions.className = "approval-actions";
-  const allowBtn = document.createElement("button");
-  allowBtn.type = "button";
-  allowBtn.textContent = "Allow";
-  allowBtn.onclick = () => void postApproval(p.approvalId, "allow");
-  const denyBtn = document.createElement("button");
-  denyBtn.type = "button";
-  denyBtn.className = "secondary";
-  denyBtn.textContent = "Deny";
-  denyBtn.onclick = () => void postApproval(p.approvalId, "deny");
-  actions.append(allowBtn, denyBtn);
-  approvalCardEl.append(title, body, actions);
+  title.textContent =
+    view.mine.length > 0 ? `待审批 · ${view.mine.length}` : "待审批";
+  approvalCardEl.append(title);
+
+  if (view.mine.length) {
+    const list = document.createElement("ul");
+    list.className = "approval-queue";
+    for (const p of view.mine) {
+      const item = document.createElement("li");
+      item.className = "approval-item";
+      item.dataset.approvalId = p.approvalId;
+
+      const head = document.createElement("div");
+      head.className = "approval-item-head";
+      head.textContent = p.tool;
+
+      const body = document.createElement("div");
+      body.className = "approval-body mono";
+      body.textContent = p.summary;
+
+      item.append(head, body);
+
+      const err = approvalErrors.get(p.approvalId);
+      if (err) {
+        const errEl = document.createElement("div");
+        errEl.className = "approval-error";
+        errEl.setAttribute("role", "alert");
+        errEl.textContent = err;
+        item.append(errEl);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "approval-actions";
+      const busy = approvalInFlight.has(p.approvalId);
+      const allowBtn = document.createElement("button");
+      allowBtn.type = "button";
+      allowBtn.textContent = decisionLabel("allow");
+      allowBtn.disabled = busy;
+      allowBtn.setAttribute("aria-label", `${decisionLabel("allow")} ${p.tool}`);
+      allowBtn.onclick = () => void postApproval(p.approvalId, "allow");
+      const denyBtn = document.createElement("button");
+      denyBtn.type = "button";
+      denyBtn.className = "secondary";
+      denyBtn.textContent = decisionLabel("deny");
+      denyBtn.disabled = busy;
+      denyBtn.setAttribute("aria-label", `${decisionLabel("deny")} ${p.tool}`);
+      denyBtn.onclick = () => void postApproval(p.approvalId, "deny");
+      actions.append(allowBtn, denyBtn);
+      item.append(actions);
+      list.append(item);
+    }
+    approvalCardEl.append(list);
+  }
+
+  if (view.otherCount > 0) {
+    const other = document.createElement("div");
+    other.className = "approval-other";
+    other.textContent =
+      view.mine.length > 0
+        ? `其他 Agent 还有 ${view.otherCount} 条待审批，切换 Agent 后可处理。`
+        : `其他 Agent 还有 ${view.otherCount} 条待审批。在左侧切换 Agent 后可允许或拒绝。`;
+    approvalCardEl.append(other);
+  }
 }
 
 async function postApproval(approvalId: string, decision: "allow" | "deny") {
-  const base = (gwHttpBaseEl.value || DEFAULT_GW_HTTP).trim().replace(/\/$/, "");
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const tok = gwApproveTokenEl.value.trim();
-  if (tok) {
-    headers.Authorization = `Bearer ${tok}`;
-    headers["X-Atlas-Approval-Token"] = tok;
-  }
+  if (approvalInFlight.has(approvalId)) return;
+  approvalInFlight.add(approvalId);
+  approvalErrors.delete(approvalId);
+  renderApprovalCard();
+  const base = readGwHttpBase();
+  const init = approvalFetchInit(approvalId, decision, readGwToken());
   try {
     const resp = await fetch(`${base}/approve`, {
       method: "POST",
-      headers,
-      body: JSON.stringify({ approvalId, decision }),
+      headers: init.headers,
+      body: init.body,
     });
     const text = await resp.text();
-    appendLog(
-      resp.ok ? "info" : "warn",
-      `GA1 /approve ${decision} ${resp.status}`,
-      text,
-    );
-    if (resp.ok || resp.status === 409) {
-      pendingApprovals.delete(approvalId);
-      renderApprovalCard();
+    if (approvalSettled(resp.status)) {
+      forgetPending(pendingApprovals, approvalId);
+      approvalErrors.delete(approvalId);
+      appendLog("info", `GA1 /approve ${decision} ${resp.status}`, text);
+    } else {
+      const msg = formatApprovalFailure({ decision, status: resp.status, body: text });
+      approvalErrors.set(approvalId, msg);
+      appendLog("warn", msg, text);
     }
   } catch (e) {
-    appendLog("warn", `GA1 /approve failed: ${(e as Error).message || e}`);
+    const detail = e instanceof Error ? e.message : String(e);
+    const msg = formatApprovalFailure({ decision, networkError: detail });
+    approvalErrors.set(approvalId, msg);
+    appendLog("warn", msg);
+  } finally {
+    approvalInFlight.delete(approvalId);
+    renderApprovalCard();
   }
 }
 
@@ -809,6 +878,7 @@ function renderAgentSelect() {
   }
   renderMemberMultiSelect();
   renderGroupMeta();
+  renderApprovalCard();
 }
 
 function mergeKnownFromRoster(agents: RosterEntry[]) {
@@ -988,26 +1058,18 @@ function ensureClient(): HubClient {
       onEvent: (ev) => {
         events.push(ev);
         renderEvents();
+        const pending = ingestHubToolPending(pendingApprovals, {
+          channel: ev.channel,
+          agentId: ev.agentId,
+          event: ev.event,
+        });
+        if (pending) {
+          renderApprovalCard();
+          appendLog("event", `GA1 approval pending ${pending.approvalId} agent=${pending.agentId}`);
+        }
         if (ev.agentId !== currentAgentId()) {
           appendLog("event", `event for other agent ${ev.agentId} (not mixed into current view)`);
           return;
-        }
-        if (ev.channel === "hub:tool") {
-          const summary =
-            typeof ev.event === "object" && ev.event && "summary" in (ev.event as object)
-              ? String((ev.event as { summary?: unknown }).summary ?? "")
-              : "";
-          const parsed = parseApprovalPending(summary);
-          if (parsed) {
-            pendingApprovals.set(parsed.approvalId, {
-              approvalId: parsed.approvalId,
-              tool: parsed.tool,
-              summary,
-              agentId: ev.agentId,
-            });
-            renderApprovalCard();
-            appendLog("event", `GA1 approval pending ${parsed.approvalId}`);
-          }
         }
         if (ev.channel === "hub:turn_finished") {
           appendLog("event", "turn finished — fetching transcript tail");
@@ -1226,6 +1288,7 @@ agentEl.onchange = () => {
   renderGroupMeta();
   renderRoster(lastRoster);
   renderEvents();
+  renderApprovalCard();
   void refreshTail();
   void refreshChannels().catch(() => {
     /* backend may not implement C1 */
