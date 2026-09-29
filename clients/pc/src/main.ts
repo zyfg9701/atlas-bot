@@ -478,7 +478,7 @@ async function postApproval(approvalId: string, decision: "allow" | "deny") {
     if (approvalSettled(resp.status)) {
       forgetPending(pendingApprovals, approvalId);
       approvalErrors.delete(approvalId);
-      appendLog("info", `GA1 /approve ${decision} ${resp.status}`, text);
+      appendLog(resp.ok ? "info" : "warn", `GA1 /approve ${decision} ${resp.status}`, text);
     } else {
       const msg = formatApprovalFailure({ decision, status: resp.status, body: text });
       approvalErrors.set(approvalId, msg);
