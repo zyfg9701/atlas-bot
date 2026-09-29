@@ -69,7 +69,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -1729,6 +1730,77 @@ async fn http_approve_dyn(
     }
 }
 
+/// PC Chat is a browser page (`localhost:1420`, `tauri.localhost`, …) posting at
+/// loopback `/approve`. JSON triggers a CORS preflight. Allow that only for
+/// loopback page origins so a random website cannot drive the gate.
+/// Non-browser clients send no `Origin` and are unchanged.
+fn loopback_page_origin(origin: &str) -> bool {
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .or_else(|| origin.strip_prefix("tauri://"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if let Some(inner) = hostport.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else {
+        hostport.split(':').next().unwrap_or("")
+    };
+    matches!(
+        host,
+        "localhost" | "127.0.0.1" | "::1" | "tauri.localhost" | "ipc.localhost"
+    )
+}
+
+fn apply_approval_cors(headers: &mut HeaderMap, origin: Option<&str>) {
+    let Some(origin) = origin else {
+        return;
+    };
+    let Ok(value) = HeaderValue::from_str(origin) else {
+        return;
+    };
+    headers.insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("content-type, authorization, x-atlas-approval-token"),
+    );
+    headers.insert(axum::http::header::VARY, HeaderValue::from_static("Origin"));
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+}
+
+async fn approval_browser_cors(req: axum::extract::Request, next: Next) -> Response {
+    let is_approve = req.uri().path() == "/approve";
+    let origin = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|o| loopback_page_origin(o))
+        .map(str::to_string);
+    if is_approve && req.method() == axum::http::Method::OPTIONS {
+        let mut res = if origin.is_some() {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            StatusCode::FORBIDDEN.into_response()
+        };
+        apply_approval_cors(res.headers_mut(), origin.as_deref());
+        return res;
+    }
+    let mut res = next.run(req).await;
+    if is_approve {
+        apply_approval_cors(res.headers_mut(), origin.as_deref());
+    }
+    res
+}
+
 /// Serve `/invoke`, `/vnc-descriptor`, `/vnc-stub`, `/healthz`, `/stats`, `/approve`.
 pub fn gateway_http_router(gw: Arc<dyn Gateway>) -> Router {
     gateway_http_router_with_meta(gw, GatewayHttpMeta::default())
@@ -1760,6 +1832,7 @@ pub fn gateway_http_router_with_meta(gw: Arc<dyn Gateway>, meta: GatewayHttpMeta
         .route("/healthz", get(http_healthz_dyn))
         .route("/stats", get(http_stats_dyn))
         .route("/approve", post(http_approve_dyn))
+        .layer(axum::middleware::from_fn(approval_browser_cors))
         .with_state(DynHttpState { gw, meta })
 }
 
@@ -1882,6 +1955,20 @@ impl Gateway for HttpGatewayClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_cors_allows_only_loopback_pages() {
+        assert!(loopback_page_origin("http://localhost:1420"));
+        assert!(loopback_page_origin("http://127.0.0.1:1420"));
+        assert!(loopback_page_origin("http://[::1]:1420"));
+        assert!(loopback_page_origin("https://tauri.localhost"));
+        assert!(loopback_page_origin("tauri://localhost"));
+        assert!(loopback_page_origin("http://ipc.localhost"));
+        assert!(!loopback_page_origin("https://evil.example"));
+        assert!(!loopback_page_origin("http://localhost.evil.example"));
+        assert!(!loopback_page_origin("null"));
+        assert!(!loopback_page_origin(""));
+    }
 
     #[tokio::test]
     async fn list_send_tail_roundtrip() {

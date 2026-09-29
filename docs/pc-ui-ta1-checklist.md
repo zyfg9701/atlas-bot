@@ -98,6 +98,7 @@ Gateway HTTP 默认 `http://127.0.0.1:8787`（`localStorage` 键 `atlas-pc-gw-ht
 | 结束 | HTTP 2xx 或 409（已关闭）才从队列移除 |
 | 失败 | `formatApprovalFailure` 写在该条卡片上，并 `appendLog` 供调试页查看 |
 | 地址 | 输入框优先，否则 `atlas-pc-gw-http`，再否则 `http://127.0.0.1:8787` |
+| CORS | Chat 页面和 Gateway 不同源，`application/json` 会先 `OPTIONS /approve`。Gateway 只给 `localhost` / `127.0.0.1` / `::1` / `tauri.localhost` / `ipc.localhost` 回 `Access-Control-Allow-Origin`。其他网站拿不到允许头。curl / smoke 不带 Origin，行为不变 |
 
 ## 明确不在 TA1
 

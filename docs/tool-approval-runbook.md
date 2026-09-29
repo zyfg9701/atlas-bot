@@ -74,6 +74,7 @@ Content-Type: application/json
 ```
 
 - **Loopback-only** (`127.0.0.1` / `::1`). Non-loopback → 403.
+- Browser preflight: `OPTIONS /approve` plus `Access-Control-Allow-Origin` **only** when `Origin` is a loopback page (`localhost`, `127.0.0.1`, `::1`, `tauri.localhost`, `ipc.localhost`). Other origins are not allowed, so a website cannot call the gate. Requests without `Origin` (curl, smoke) are unchanged.
 - Optional token: `Authorization: Bearer <ATLAS_TOOL_APPROVAL_TOKEN>` or `X-Atlas-Approval-Token`.
 - Failures never become Allow.
 - Discoverability: `GET /healthz` includes `tool_approval_mode`, `tool_approval_gate` (boolean), `tool_approval_token_configured` (no secret echo) for **both** `backend=box` and `backend=cli`.
