@@ -74,6 +74,7 @@ Content-Type: application/json
 ```
 
 - **Loopback-only** (`127.0.0.1` / `::1`). Non-loopback → 403.
+- Browser preflight: `OPTIONS /approve` plus `Access-Control-Allow-Origin` **only** when `Origin` is a loopback page (`localhost`, `127.0.0.1`, `::1`, `tauri.localhost`, `ipc.localhost`). Other origins are not allowed, so a website cannot call the gate. Requests without `Origin` (curl, smoke) are unchanged.
 - Optional token: `Authorization: Bearer <ATLAS_TOOL_APPROVAL_TOKEN>` or `X-Atlas-Approval-Token`.
 - Failures never become Allow.
 - Discoverability: `GET /healthz` includes `tool_approval_mode`, `tool_approval_gate` (boolean), `tool_approval_token_configured` (no secret echo) for **both** `backend=box` and `backend=cli`.
@@ -88,11 +89,21 @@ Thin reuse of existing `bot.event` / `hub:tool` (no new bot method):
 
 PC / operators may parse this for a thin Allow/Deny card. Post-exec `hub:tool` remains the after-the-fact evidence channel (distinct from pending).
 
-## 7. PC thin card
+## 7. PC thin card (TA1)
 
-Chat shows a small approval card when a pending `hub:tool` arrives. Allow/Deny `POST` to the configured **gateway HTTP base** (Advanced field; default `http://127.0.0.1:8787`). No Chat/Debug IA rearrange. No new Hub wire.
+Chat shows an approval **queue** above the composer when pending `hub:tool` events arrive. Buttons are **允许** / **拒绝** and `POST { approvalId, decision: "allow" | "deny" }` to the gateway HTTP base. Deny still follows the existing kill / timeout=Deny path. No new `bot.command`. Debug → Advanced still holds the operator fields; Events / Log stay the observation bypass.
 
-**CG1:** **reuse** the same card (zero or copy-only) — cli pending uses the identical `[approval_pending …]` prefix.
+| Item | Behavior |
+|------|----------|
+| Default base | `http://127.0.0.1:8787` (`localStorage` `atlas-pc-gw-http`). Chat uses it without opening Advanced. |
+| Optional token | Advanced field, stored as `atlas-pc-gw-approve-token`. Not required for default loopback. |
+| Queue | Every pending id for the current agent stays listed. A newer event does not drop older ids. Other agents' ids are kept and shown after switching agent (count when they belong elsewhere). |
+| Failure | Inline error on the card in Chat (Chinese). Raw Log still records the same failure. |
+| Success / 409 | That id leaves the queue. Siblings stay. |
+
+**CG1:** **reuse** the same card — cli pending uses the identical `[approval_pending …]` prefix.
+
+Checklist: [`pc-ui-ta1-checklist.md`](./pc-ui-ta1-checklist.md).
 
 ## 8. Smoke / CI
 

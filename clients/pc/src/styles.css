@@ -357,9 +357,9 @@ ul.agents li.selected { border-color: var(--accent); background: #1c2a40; }
   border: 0;
 }
 
-/* GA1 thin approval card (Chat only; no IA redo) */
+/* TA1 approval queue — sits above the composer in Chat (not inside Debug). */
 .approval-card {
-  margin-top: 8px;
+  margin: 0 0 8px;
   padding: 10px 12px;
   border: 1px solid var(--warn);
   border-radius: 8px;
@@ -367,8 +367,39 @@ ul.agents li.selected { border-color: var(--accent); background: #1c2a40; }
 }
 .approval-card[hidden] { display: none !important; }
 .approval-title { font-weight: 600; margin-bottom: 6px; color: var(--warn); }
-.approval-body { font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; white-space: pre-wrap; max-height: 6em; overflow: auto; }
+.approval-queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow: auto;
+}
+.approval-item {
+  border-top: 1px solid rgba(245, 165, 36, 0.35);
+  padding-top: 8px;
+}
+.approval-item:first-child { border-top: 0; padding-top: 0; }
+.approval-item-head { font-weight: 600; margin-bottom: 4px; }
+.approval-body { font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; white-space: pre-wrap; max-height: 4.5em; overflow: auto; }
 .approval-actions { display: flex; gap: 8px; }
+.approval-actions button:disabled { opacity: 0.55; }
+.approval-error {
+  color: #ffb4c6;
+  background: #3d1524;
+  border: 1px solid var(--err);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+}
+.approval-other {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
 
 /* G1 group sidebar */
 .group-create {
