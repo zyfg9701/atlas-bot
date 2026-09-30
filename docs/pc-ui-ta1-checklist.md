@@ -3,7 +3,8 @@
 > 切片 **TA1** · 客户端 `clients/pc` · Chat 里对已有 GA1/CG1 待审批做允许 / 拒绝  
 > **零新 `bot.*`**。不新增 Hub 方法，不做 YOLO，不做签名上架。  
 > 协议仍是 `hub:tool` 摘要前缀 `[approval_pending approvalId=… tool=…]`，以及 loopback `POST /approve`。  
-> 对照：`docs/tool-approval-runbook.md` §6–§7。U3 清单仍在 `docs/pc-ui-u3-checklist.md`。
+> 对照：`docs/tool-approval-runbook.md` §6–§7。U3 清单仍在 `docs/pc-ui-u3-checklist.md`。  
+> U4 起 Hub WS / 可选 Bearer 在顶栏连接条（Chat 与调试共用，见 `docs/pc-ui-u4-checklist.md`）。本清单的「高级」只指 Gateway HTTP，摘要为「高级 · Gateway HTTP」。Chat 仍然看不到 Gateway 字段。
 
 ## 前置
 
@@ -44,7 +45,7 @@ Gateway HTTP 默认 `http://127.0.0.1:8787`（`localStorage` 键 `atlas-pc-gw-ht
 
 | 步 | 期望 |
 |----|------|
-| 入口选 Chat，或打开 `#/chat` | 看不到「高级 · Hub URL / Bearer」 |
+| 入口选 Chat，或打开 `#/chat` | 看不到「高级 · Gateway HTTP」（无 Gateway 地址、无 Approval token）。Hub WS 在顶栏连接条，不是 8787 |
 | Connect → 选中会跑工具的 agent → Send | badge → ready |
 | 出现待审批卡片 | 标题含「待审批 · N」。按钮为 **允许**、**拒绝** |
 | 点 **允许** | 该条从队列消失。Gateway 继续（cli：不杀进程）。Log 可有 `/approve allow`，但 Chat 不依赖 Log |
@@ -77,7 +78,7 @@ Gateway HTTP 默认 `http://127.0.0.1:8787`（`localStorage` 键 `atlas-pc-gw-ht
 | 步 | 期望 |
 |----|------|
 | 顶栏「调试」或 `#/debug` | 连接不断 |
-| 展开「高级 · Hub URL / Bearer」 | 仍有 Gateway HTTP、Approval token。改完会写入 localStorage，回到 Chat 不用再打开高级 |
+| 展开「高级 · Gateway HTTP」 | 仍有 Gateway HTTP、Approval token。改完会写入 localStorage，回到 Chat 不用再打开高级。Hub URL 不在这一折里 |
 | Events / Log | 能看到 pending 与审批结果。Conversation 不回退成 Raw JSON |
 
 证据：________

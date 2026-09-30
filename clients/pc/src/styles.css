@@ -100,6 +100,27 @@ a.linkish:hover { color: var(--text); }
 .topbar-sub { color: var(--muted); font-size: 0.85rem; }
 .topbar-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
+/* U4: one Hub WS + Bearer row, shared by Chat and Debug. Not the Gateway panel. */
+.hub-strip {
+  flex: 1 0 100%;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.hub-strip-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.hub-strip-fields label { flex: 0 0 auto; }
+.hub-strip-fields input#url { flex: 2 1 220px; }
+.hub-strip-fields input#tokenPaste { flex: 1 1 140px; }
+.hub-strip-hint { margin: 0; }
+
 .advanced, .debug-accordion {
   background: var(--panel);
   border: 1px solid var(--border);
