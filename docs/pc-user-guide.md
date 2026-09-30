@@ -27,15 +27,16 @@
 
 入口选 Chat（或直接打开 `#/chat`）后，主路径有意义点击 ≤3：
 
-1. **Connect**（顶栏；Hub 地址默认 `ws://127.0.0.1:7700/ws`。改地址、Bearer、Login 在 **调试页** 的「高级 · Hub URL / Bearer」）  
+1. **Connect**（顶栏。Hub WebSocket 默认 `ws://127.0.0.1:7700/ws`，在 Connect 下方的连接条里改，写入 `localStorage` `atlas-pc-hub-ws`。可选 Bearer 同一条，键 `atlas-pc-hub-bearer`，明文，仅私人自托管，不要在共用电脑保存。Login 仍在调试页）  
 2. （按需）选 **Agent**；Connect 成功后会自动 `listAgents` 并选中  
 3. 输入 prompt → **Send**（未订阅时自动 `subscribe`；旁路 **Interrupt**）
 
-Chat **不出现**：「更多 / 调试」手风琴、Raw Log、协议细按钮、高级 Hub、顶栏 Login、侧栏 Create group（G1）和 Channels（C1）。顶栏小字 **调试** 进入 `#/debug`。composer 旁 📎 / 🖥 仍在（调试页里也有完整 upload / Open desktop）。
+Chat **不出现**：「更多 / 调试」手风琴、Raw Log、协议细按钮、「高级 · Gateway HTTP」（审批地址 `8787` 仍只在调试页）、顶栏 Login、侧栏 Create group（G1）和 Channels（C1）。Hub WS / 可选 Bearer 在顶栏连接条，Chat 和调试页是同一对输入。顶栏小字 **调试** 进入 `#/debug`。composer 旁 📎 / 🖥 仍在（调试页里也有完整 upload / Open desktop）。
 
 | 主屏元素 | 行为 |
 |----------|------|
 | 顶栏连接态 + Connect/Disconnect | `hello` 后 badge → ready |
+| Hub 连接条 | Hub WS + 可选 Bearer。失焦写入 `atlas-pc-hub-ws` / `atlas-pc-hub-bearer`；空或非 `ws:`/`wss:` 回到默认 Hub。不是 Gateway HTTP |
 | 顶栏「调试」「入口」 | 去 `#/debug`，或清除 mode 回入口 |
 | Agent 侧栏 | 下拉 + Create agent（G1/C1 仅调试页） |
 | Conversation | 只显示 transcript 消息气泡（Markdown）。不拼 `hub:*` / Raw JSON |
@@ -46,7 +47,7 @@ Chat **不出现**：「更多 / 调试」手风琴、Raw Log、协议细按钮�
 
 ## 2. 调试页 `#/debug`
 
-入口选调试，或 Chat 顶栏 **调试**，或直接打开 `#/debug`。这是原先整页调试台（**只藏不砍**，没有删入口）：高级 Hub、Login / Logout、侧栏 G1 / C1、页底 **「更多 / 调试 ▾」**。手风琴在调试页**默认展开**（`atlas-pc-debug=0` 时保持折叠）。展开区内：
+入口选调试，或 Chat 顶栏 **调试**，或直接打开 `#/debug`。这是原先整页调试台（**只藏不砍**，没有删入口）：Hub 连接条（与 Chat 同一对输入）、**高级 · Gateway HTTP**、Login / Logout、侧栏 G1 / C1、页底 **「更多 / 调试 ▾」**。手风琴在调试页**默认展开**（`atlas-pc-debug=0` 时保持折叠）。展开区内：
 
 | 调试区块 | 入口 |
 |----------|------|
@@ -58,7 +59,7 @@ Chat **不出现**：「更多 / 调试」手风琴、Raw Log、协议细按钮�
 
 手风琴开关仍写回 `localStorage atlas-pc-debug`。`?debug=1` 见 §0。
 
-手测清单见 `docs/pc-ui-u2-checklist.md`（U1 对照：`docs/pc-ui-u1-checklist.md`；对话气泡：`docs/pc-ui-u3-checklist.md`）。
+手测清单见 `docs/pc-ui-u2-checklist.md`（U1 对照：`docs/pc-ui-u1-checklist.md`；对话气泡：`docs/pc-ui-u3-checklist.md`；Hub 地址：`docs/pc-ui-u4-checklist.md`）。
 
 ---
 
@@ -115,14 +116,15 @@ cd clients/pc && npm i && npm run tauri dev
 | 能力 | Chat `#/chat` / 调试 `#/debug` |
 |------|-------------|
 | Connect / hello / capabilities | 两页顶栏都能 Connect；caps 在调试页 |
-| Bearer / Login (OIDC PKCE) | 仅调试页（高级 Hub + Login）；生产靠 Tauri `connect_ws` |
+| Hub WS + 可选 Bearer | 两页顶栏下的同一连接条；`localStorage`。空或非法地址回到 `ws://127.0.0.1:7700/ws`。Bearer 明文仅私人自托管 |
+| Login (OIDC PKCE / WeCom) | 仅调试页；生产靠 Tauri `connect_ws`。Login 成功会把票写入上面的 Bearer 框 |
 | Cold status/roster/offbox | 调试页 |
 | list / create / **createGroup / setGroupMembers** / **Channels 四命令** / subscribe / send / interrupt / tail | Chat：自动 list + 侧栏 Create agent + Send；G1/C1 与协议细按钮在调试页 |
 | Events / transcript | 两页 Conversation 都是气泡；`hub:*` 只在调试页 Events / Hot transcript / Log |
 | VNC / upload / attach | composer 图标（两页）+ 调试页完整控件 |
 | Failure / Log | 错误条 + 调试页 Log |
 
-**还不是：** 品牌视觉系统、**真连 Slack / 多平台频道**（C1-real / C1-multi 另票）、上架包、强制移动建群/频道 UI、群套群 / fan-out 编排、删群产品化、I2.2 移动取票、React/Vue 重写、GA2/YOLO/desktop 集群、token 钥匙串/加密落盘。
+**还不是：** 品牌视觉系统、**真连 Slack / 多平台频道**（C1-real / C1-multi 另票）、上架包、强制移动建群/频道 UI、群套群 / fan-out 编排、删群产品化、I2.2 移动取票、React/Vue 重写、GA2/YOLO/desktop 集群、token 钥匙串/加密落盘（U4 的 Bearer 只是明文 `localStorage`，不是钥匙串）。
 
 **G1 已交付（PC）：** 侧栏 **Create group**（name + 多选已有非群 agent）→ 列表带 `[group]` 标记并可自动选中；选中群可见成员；**Change members** 改成员；对群 agentId 既有 Subscribe/Send/transcript 不回归。零新 `bot.*`（仅 catalog `createGroup` / `setGroupMembers` 经 `bot.command`）。Gateway：**InMemory + Box** 同形；**CLI / OpenAI** 本刀未跟（对该后端群命令仍 `UnknownMethod` 闭集拒绝，不装成功）。
 **C1 已交付（PC）：** 侧栏 **Channels (C1 · local stub)** — 单平台 `slack` manifest；password 粘贴 token → Connect / Disconnect / Refresh；文案标明本地 stub、未出网。零新 `bot.*`（仅 catalog 四命令经 `bot.command`）。Gateway：**InMemory + Box** 同形；**CLI / OpenAI** 未跟（闭集 `UnknownMethod`）。Token 仅进程内存，reply/日志不回显，Disconnect 清除；不写 localStorage/钥匙串。
@@ -170,7 +172,8 @@ cd clients/pc && npm i && npm run tauri dev
 ## 6. §7 已知限制（U2）
 
 - **深链 vs `atlas-pc-mode`：** 显式 `#/chat` / `#/debug` 优先并回写 mode。仅当 hash 为空、`#/` 或无法识别时，才用 mode 恢复。点「入口」会清掉 mode。  
-- **Chat 上没有的东西：** 高级 Hub、Login、G1 Create group、C1 Channels、调试手风琴 / Raw Log / 协议细按钮。改 Hub 地址或登录走顶栏 **调试**。📎 / 🖥 仍留在 composer。  
+- **Chat 上没有的东西：** 「高级 · Gateway HTTP」、Login、G1 Create group、C1 Channels、调试手风琴 / Raw Log / 协议细按钮。Hub 地址和可选 Bearer 在顶栏连接条（调试页同一对输入）。登录仍走顶栏 **调试**。📎 / 🖥 仍留在 composer。  
+- **Hub 地址（U4）：** `atlas-pc-hub-ws` / `atlas-pc-hub-bearer`。默认 `ws://127.0.0.1:7700/ws`。Gateway `http://127.0.0.1:8787` 不会写进 Hub URL。见 `docs/pc-ui-u4-checklist.md`。  
 - **`?debug=1` 与 `#/debug`：** 查询参数只在当次加载强制进入调试页并展开手风琴，随后从地址栏删除。之后以 hash 和 `atlas-pc-mode` 为准。`atlas-pc-debug` 只控制手风琴，不决定路由。  
 - **主布局形态：** 顶栏连接 + **侧栏 agent** + 主对话区（非顶栏-only）。调试页是同一套 DOM，不是第二份连接。  
 - **对话流（U3）：** Conversation 只渲染 transcript 气泡（用户 / 助手 / 系统），正文走 Markdown。同一条回复不会再被 `hub:turn_finished` 的 preview 贴第二次。调试页 Events / Hot transcript / Log 仍是原文。见 `docs/pc-ui-u3-checklist.md`。  
@@ -181,6 +184,7 @@ cd clients/pc && npm i && npm run tauri dev
 
 ## 7. 相关文档
 
+- U4 手测（Hub URL / Bearer）：`docs/pc-ui-u4-checklist.md`  
 - U3 手测：`docs/pc-ui-u3-checklist.md`  
 - U2 手测：`docs/pc-ui-u2-checklist.md`  
 - U1 手测：`docs/pc-ui-u1-checklist.md`  

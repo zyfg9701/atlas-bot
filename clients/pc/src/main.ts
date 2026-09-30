@@ -39,6 +39,12 @@ import {
 } from "./chatMessages";
 import { renderChatMarkdown } from "./chatMarkdown";
 import {
+  loadHubConnection,
+  saveHubBearer,
+  saveHubWs,
+  type HubPrefStore,
+} from "./hubConnection";
+import {
   GW_APPROVE_TOKEN_STORAGE_KEY,
   GW_HTTP_STORAGE_KEY,
   approvalCardVisible,
@@ -147,18 +153,19 @@ app.innerHTML = `
       <a id="linkDebug" class="linkish chat-only" href="#/debug">调试</a>
       <a id="linkChat" class="linkish debug-only" href="#/chat">Chat</a>
     </div>
+    <div class="hub-strip" id="hubStrip" role="region" aria-label="Hub 连接">
+      <div class="hub-strip-fields">
+        <label for="url">Hub WS</label>
+        <input id="url" value="${DEFAULT_HUB_WS}" spellcheck="false" autocomplete="off" title="Hub WebSocket，默认 ws://127.0.0.1:7700/ws" />
+        <label for="tokenPaste">Bearer</label>
+        <input id="tokenPaste" spellcheck="false" autocomplete="off" placeholder="可选" title="可选 Bearer。写入本机 localStorage，仅私人自托管" />
+      </div>
+      <p class="hint hub-strip-hint">Hub WebSocket（不是 Gateway HTTP 8787）。可选 Bearer 保存在本机 localStorage，仅供私人自托管，不要在共用电脑上保存。</p>
+    </div>
   </header>
 
   <details class="advanced debug-only" id="advancedHub">
-    <summary>高级 · Hub URL / Bearer</summary>
-    <div class="row">
-      <label for="url">Hub WS</label>
-      <input id="url" value="${DEFAULT_HUB_WS}" />
-    </div>
-    <div class="row">
-      <label for="tokenPaste">Bearer</label>
-      <input id="tokenPaste" placeholder="optional paste token (dev) or after Login" />
-    </div>
+    <summary>高级 · Gateway HTTP</summary>
     <div class="row">
       <label for="gwHttpBase">Gateway HTTP</label>
       <input id="gwHttpBase" placeholder="http://127.0.0.1:8787" title="GA1 /approve base (loopback)" />
@@ -504,6 +511,42 @@ const uploadOut = $("uploadOut");
 const filePick = $<HTMLInputElement>("filePick");
 const filePickMain = $<HTMLInputElement>("filePickMain");
 const tokenPaste = $<HTMLInputElement>("tokenPaste");
+const hubPrefStore: HubPrefStore = {
+  getItem: readStorage,
+  setItem: writeStorage,
+  removeItem: removeStorage,
+};
+
+function commitHubUrlFromField(): string {
+  const url = saveHubWs(hubPrefStore, urlEl.value);
+  urlEl.value = url;
+  return url;
+}
+
+function commitHubBearerFromField(): string {
+  const bearer = saveHubBearer(hubPrefStore, tokenPaste.value);
+  tokenPaste.value = bearer;
+  return bearer;
+}
+
+{
+  const loaded = loadHubConnection(hubPrefStore);
+  urlEl.value = loaded.url;
+  tokenPaste.value = loaded.bearer;
+}
+urlEl.addEventListener("change", () => {
+  commitHubUrlFromField();
+});
+urlEl.addEventListener("blur", () => {
+  commitHubUrlFromField();
+});
+tokenPaste.addEventListener("change", () => {
+  commitHubBearerFromField();
+});
+tokenPaste.addEventListener("blur", () => {
+  commitHubBearerFromField();
+});
+
 const authOut = $("authOut");
 const debugPanel = $<HTMLDetailsElement>("debugPanel");
 const gwHealthOut = $("gwHealthOut");
@@ -1044,7 +1087,7 @@ function renderRoster(agents: RosterEntry[]) {
 
 function ensureClient(): HubClient {
   if (!client) {
-    client = new HubClient(urlEl.value, {
+    client = new HubClient(commitHubUrlFromField(), {
       onState: (s, d) => {
         setStateBadge(s);
         if (d) appendLog("info", `state=${s}`, d);
@@ -1085,7 +1128,7 @@ function ensureClient(): HubClient {
       onRpcError: (err) => showFail(err),
     });
   } else {
-    client.setUrl(urlEl.value);
+    client.setUrl(commitHubUrlFromField());
   }
   return client;
 }
@@ -1301,10 +1344,11 @@ $("btnConnect").onclick = async () => {
   lastTailRaw = null;
   pendingSends = [];
   renderEvents();
-  const pasted = tokenPaste.value.trim() || sessionToken;
+  const url = commitHubUrlFromField();
+  const pasted = commitHubBearerFromField() || sessionToken;
   if (pasted) sessionToken = pasted;
   const c = ensureClient();
-  c.setUrl(urlEl.value);
+  c.setUrl(url);
   c.setAuthorization(sessionToken);
 
   // Production path: Tauri rust WS with Authorization header (browser cannot).
@@ -1312,7 +1356,7 @@ $("btnConnect").onclick = async () => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const r = await invoke<{ ok: boolean; detail: string }>("connect_ws", {
-        url: urlEl.value,
+        url,
         authorization: sessionToken,
       });
       appendLog("info", "tauri connect_ws", r);
@@ -1409,6 +1453,7 @@ $("btnLogin").onclick = async () => {
       });
       sessionToken = tr.access_token;
       tokenPaste.value = tr.access_token;
+      commitHubBearerFromField();
       authOut.textContent = `auth: wecom logged in subject=${tr.subject ?? "?"} — Connect uses Tauri Bearer`;
       appendLog("info", "login ok", { provider: "wecom", subject: tr.subject });
       return;
@@ -1458,6 +1503,7 @@ $("btnLogin").onclick = async () => {
     if (!bearer) throw new Error("no id_token/access_token");
     sessionToken = bearer;
     tokenPaste.value = bearer;
+    commitHubBearerFromField();
     authOut.textContent = "auth: logged in (id_token preferred) — Connect uses Tauri Bearer when available";
     appendLog("info", "login ok", { provider: "oidc", has_id_token: !!tr.id_token });
   } catch (e) {
@@ -1468,6 +1514,7 @@ $("btnLogin").onclick = async () => {
 $("btnLogout").onclick = () => {
   sessionToken = undefined;
   tokenPaste.value = "";
+  commitHubBearerFromField();
   client?.setAuthorization(undefined);
   client?.disconnect();
   client = null;
